@@ -1,0 +1,1 @@
+# Script to install all needed packages for the lessons
