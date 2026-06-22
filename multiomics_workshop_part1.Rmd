@@ -1,5 +1,5 @@
 ---
-title: "Multiomics workshop part 1: INSERT TITLE HERE"
+title: "Multiomics workshop part 1: Working with transcriptome data"
 author: "Quentin D. Read"
 date: "`r format(Sys.time(), '%B %d, %Y')`"
 output: 
@@ -7,7 +7,6 @@ output:
     toc: true
     toc_depth: 2
     toc_float: true
-    code_folding: hide
 ---
 
 ```{css, echo = FALSE}
@@ -22,13 +21,52 @@ output:
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 ```
 
+# Background
+
+We are going to analyze RNAseq transcriptome data. This dataset was collected because the researchers were interested in whether gene expression changes over time after the induction of lipolysis in mouse fat cells. The RNAseq technique counts the numbers of RNA transcripts from many different genes. The number of RNA transcripts of a gene that are found within a cell are an indication of how much that gene is being expressed. We can compare the level of expression of different genes, or of the same gene under different conditions. In this case, the conditions are three different time points (0h, 4h, 24h) after induction of lipolysis of a differentiated murine adipocyte cell line (BMC). 
+
+At each time point, six replicate samples were taken, for a total of 3 time points &times; 6 replicates = 18 samples. (By the way, it is unclear to me from reading the paper whether there were truly 18 independent samples or whether there were three repeated measures taken on the same six experimental units. For demo purposes today, we will ignore that issue and assume we have 18 independent samples.)
+
+In this notebook, we are going to take the more or less raw counts and go through these steps. Along the way I'll try to explain why exactly we're doing what we're doing, so don't worry if you don't already know the rationale behind each step of the pipeline.
+
+- Explore the data
+- Add metadata
+- Remove duplicate genes
+- Remove genes with low expression
+- Transform counts to account for library size
+- Further transform to meet assumptions of the linear models
+- Fit differential expression model
+- Apply different cutoffs to identify differentially expressed genes
+- Create graphs and tables to visualize the results
+
+You'll notice this is not "multi" omics yet. We are only working with the transcriptomics data. But I think it's good to start by working with individual datasets before we get into the fancy and complicated integration stuff.
+
+Here are the original sources this lesson is based on:
+
+- [iScience paper](https://doi.org/10.1016/j.isci.2025.113382)
+- [STAR protocol](https://doi.org/10.1016/j.xpro.2026.104534)
+- [Guide to RNAseq analysis with limma, Glimma, and edgeR](https://f1000research.com/articles/5-1408/v3)
+
 # Setup
 
-Load packages. Set plot theme.
+## Load packages
+
+Load packages. If you are running this code from within the SCINet project, the packages should already be installed. If you are running this code on your own machine, you may need to install some of the packages. Packages that are hosted on CRAN, the main R package repository, can be installed using `install.packages('packagename')`. Packages that are hosted on Bioconductor can be installed by first installing the BiocManager package from CRAN and then installing Bioconductor packages using `BiocManager::install('packagename')`. 
 
 ```{r load packages}
+# CRAN packages
 library(ggplot2)
+library(RColorBrewer)
 
+# Bioconductor packages
+library(limma)
+library(edgeR)
+library(Mus.musculus)
+```
+
+Set plot theme.
+
+```{r set plot theme}
 theme_set(
   theme_bw(base_size = 14) + 
     theme(panel.grid = element_blank(),
@@ -37,4 +75,193 @@ theme_set(
 )
 ```
 
+## Import data and add metadata
+
+The data to be imported is in a file called `transcriptome.rda`. RNAseq data consists of read counts for a bunch of different genes. The data in this file has already been converted from a raw CSV file containing the counts, into a format that works with the R package edgeR. It is in the format of a list with three elements, called `counts`, `samples`, and `offset`. The `counts` object holds the count data, the `samples` object holds metadata on each of the samples, and the `offset` object includes normalization factors that have already been calculated for each of the samples.
+
+Load the data into your workspace.
+
+```{r}
+load(file = 'data/transcriptome.rda')
+```
+
+Look at the dimensions of the `counts` object. There are > 45,000 rows (genes) and 18 columns (samples).
+
+```{r}
+dim(transcriptome$counts)
+```
+
+The `samples` metadata object does not currently have information on which time point each sample comes from. This code manually adds the group column.
+
+```{r}
+groups <- as.factor(c("tp_0h", "tp_0h", "tp_4h", "tp_24h", "tp_0h", "tp_4h", "tp_24h", "tp_0h", "tp_4h", "tp_24h", "tp_4h", "tp_24h", "tp_0h", "tp_4h", "tp_24h", "tp_0h", "tp_4h", "tp_24h"))
+transcriptome$samples$group <- groups
+transcriptome$samples
+```
+
+Take a look at the first few rows of the `counts` object. You can see that the rows are named with the Ensembl gene IDs. To get more informative IDs, look up the Ensembl gene IDs using a lookup table that is included in the Mus.musculus package.
+
+```{r}
+head(transcriptome$counts)
+```
+
+```{r}
+geneid <- rownames(transcriptome)
+genes <- select(
+  Mus.musculus, 
+  keys=geneid, 
+  columns=c("SYMBOL", "TXCHROM", "ENTREZID"),
+  keytype="ENSEMBL"
+)
+dim(genes)
+```
+
+There are a few more genes in the new lookup table than there are in the original dataset, so there must be a few duplicates. Remove any duplicates by keeping only the first instance of each of the Ensembl IDs. Then add the `genes` lookup table to our data list.
+
+```{r}
+genes <- genes[!duplicated(genes$ENSEMBL),]
+transcriptome$genes <- genes
+```
+
+# Transform and filter data
+
+## Log counts per million transformation
+
+The 18 samples all have a different library size, as we saw above when we looked at the `samples` object. If some of the samples were sequenced to greater depth than others, they will end up having higher counts. We cannot directly compare the raw counts across different samples, without first adjusting for this difference in size. 
+
+One kind of transformation we can do is the CPM (counts per million) transformation. In these samples, library size varies from ~7 million at the lowest sequencing depth to ~26 million at the highest. A gene with CPM = 1 for this sample would have ~7 counts in the low-depth and ~26 counts in the high-depth sample. The function `cpm()` from edgeR implements this transformation.
+
+```{r}
+cpm <- cpm(transcriptome)
+```
+
+The log-CPM transformation is the CPM on the log base 2 scale. Because many of the counts are zero, a small constant is added before taking the log, which is based on the average library size. This avoids taking the log of zero and also smooths out the variability for genes expressed at a low level.
+
+```{r}
+lcpm <- cpm(transcriptome, log = TRUE)
+
+summary(lcpm)
+```
+
+## Filtering by expression
+
+An obvious step is to remove genes that have all zero counts across all the samples. They contribute no information at all. Almost 20,000 of the 45,000 genes have zero counts across all 18 samples.
+
+```{r}
+table(rowSums(transcriptome$counts) == 0)
+```
+
+But genes that are expressed at very low levels across all samples also probably don't have any biological relevance. We want to remove them as well. The function `filterByExpr()` from the edgeR package keeps only genes that have a CPM value above a pre-specified cutoff in a reasonable proportion of the samples. Using all default arguments to this function, we filter out about 30,000 genes, leaving a little less than 15,000.
+
+> Details on how the filtering is done: the default minimum read count is 10. Convert that to a CPM using the median library size of 21 million from the dataset; 10/21 $\approx$ 0.48. Because each time point has six replicates, the filtering keeps all genes with a CPM of at least 0.48 in six samples.
+
+```{r}
+transcriptome_unfiltered <- transcriptome # Keep this so that we can make the figure comparing filtered vs. unfiltered later.
+
+keep.exprs <- filterByExpr(transcriptome, group = transcriptome$samples$group)
+transcriptome <- transcriptome[keep.exprs, , keep.lib.sizes = FALSE]
+dim(transcriptome)
+```
+
+Let's take a look at the distribution of log CPM values in the original unfiltered data versus the filtered data. (Don't worry about the code used to produce this figure.)
+
+You can see that the filtering process has removed the large proportion of genes within each sampling with little or no expression.
+
+```{r}
+L <- mean(transcriptome_unfiltered$samples$lib.size) * 1e-6
+M <- median(transcriptome_unfiltered$samples$lib.size) * 1e-6
+
+lcpm.cutoff <- log2(10/M + 2/L)
+
+lcpm_unfiltered <- cpm(transcriptome_unfiltered, log = TRUE)
+lcpm_filtered <- cpm(transcriptome, log = TRUE)
+
+nsamples <- ncol(transcriptome_unfiltered)
+col <- brewer.pal(nsamples, "Set3")
+par(mfrow=c(1,2))
+plot(density(lcpm_unfiltered[,1]), col=col[1], lwd=2, ylim=c(0,0.7), las=2, main="", xlab="")
+title(main="A. Raw data", xlab="Log-cpm")
+abline(v=lcpm.cutoff, lty=3)
+for (i in 2:nsamples){
+  den <- density(lcpm_unfiltered[,i])
+  lines(den$x, den$y, col=col[i], lwd=2)
+}
+
+plot(density(lcpm_filtered[,1]), col=col[1], lwd=2, ylim=c(0,0.26), las=2, main="", xlab="")
+title(main="B. Filtered data", xlab="Log-cpm")
+abline(v=lcpm.cutoff, lty=3)
+for (i in 2:nsamples){
+  den <- density(lcpm_filtered[,i])
+  lines(den$x, den$y, col=col[i], lwd=2)
+}
+```
+
+## Normalize the remaining data
+
+Typically the next step would be to normalize the remaining data. Normalizing means getting rid of any unwanted external factors that may influence expression of individual samples. We want to be able to make a fair comparison of the expression within each gene between the different groups. To do that, all samples need to have a similar distribution of expression values.
+
+The figure we just made already shows us that the distributions of log-CPM values are extremely similar between the different samples, so in this case normalization will not have a very big effect. But it's a good idea to do it anyway. `calcNormFactors()` from edgeR adds the normalization factors as a new column in the `samples` object of our transcriptome data list. You can see below that most of the calculated normalization factors are all pretty close to 1 (between ~0.90 and ~1.15), indicating that normalization is only having a modest effect. One sample has a normalization factor of 0.43, so normalization is going to have a bigger impact on that one.
+
+```{r normalization, warning = TRUE}
+transcriptome <- calcNormFactors(transcriptome, method = "TMM")
+transcriptome$samples$norm.factors
+```
+
+As it turns out, the transcriptome data we started with already has offset values calculated. These are more highly resolved normalization factors that are applied to every single observation separately, that were calculated by a previous edgeR step. Offsets take precedence over the normalization factors we just calculated.
+
+# Investigate the structure of the data
+
+## Multidimensional scaling plot
+
+Ultimately, we are interested in looking at expression patterns across all genes to see whether there are time trends that are common across genes. Before we do a formal analysis, we can use "quick and dirty" dimension reduction methods like multidimensional scaling (MDS) or principal components analysis (PCA) to visualize our high-dimensional data in fewer dimensions. We have about 15,000 genes but we can make a multidimensional scaling plot to show similarities and dissimilarities between our samples. 
+
+The basic way MDS, and more or less all dimensionality reduction methods, work, is that it tries to reduce N-dimensional data into a smaller number of dimensions, while preserving as much information from the original data as possible. Here, our N is ~15,000. MDS takes the distances between each pair from our 18 samples in N-dimensional space and puts them into a lower-dimensional space in such a way that the distances between any two samples are preserved as well as possible. If the lower number of dimensions is 2, we can display it on a scatterplot. I'll skip any more details on that.
+
+```{r}
+plotMDS(
+  lcpm_filtered, 
+  labels = groups, 
+  col = as.character(factor(groups, labels = c("salmon", "darkolivegreen3", "turquoise3")))
+)
+```
+
+The MDS plot shows us that the samples from each time point cluster very well in 2-dimensional space, with one major exception. One of the samples from the 4-hour time point is very dissimilar to all the other ones (sample 17). If you look back at the library sizes for the different samples, it is the one with by far the lowest sequencing depth. So, it seems like something went wrong with that sample. You might consider excluding it from the analysis.
+
+## Relationship between mean and variance
+
+We are going to use a linear model approach to look at which genes are expressed at different levels in the different time points. An important assumption of a linear model that is based on normally distributed error is that there is no relationship between the mean and the variance. If that assumption is violated, we might end up drawing the wrong conclusions. Count data, like we have here, often have skewed distributions with a lot of small values at or near zero and a few high values, because it is not possible to have a count below zero. We usually deal with this issue by either transforming the data or fitting special statistical models that do not have to assume the variation around each mean is normally distributed. 
+
+In this case, we are going to use the function `voom` from the limma package to deal with the mean-variance relationship issue. (Apparently "voom" stands for "mean-variance modeling at the observational level," though I am not sure how they got those letters from that.) The voom algorithm takes the log-counts per million values (after we've already filtered the ones with very low counts out), fits linear models to each gene separately to estimate the relationship between the mean and the variance, then weights each observation to adjust it based on its predicted variance. Observations with higher predicted variance get a lower weight. This flattens out the mean-variance trend.
+
+The first step is to set up a design matrix, which is a matrix of zeros and ones that indicates which group (time point in this case) each sample belongs to. The design matrix object also includes a contrasts attribute, which indicates which means have to be subtracted from each other to get the differences between each pair of means.
+
+```{r}
+design <- model.matrix(~0+groups)
+colnames(design) <- gsub("groups", "", colnames(design))
+design
+contr.matrix <- makeContrasts(
+  Comp_0h_v_4h = tp_0h - tp_4h,
+  Comp_0h_v_24h = tp_0h - tp_24h,
+  Comp_4h_v_24h = tp_4h - tp_24h,
+  levels = colnames(design))
+contr.matrix
+```
+
+Now we can just pass the filtered transcriptome data object and the design matrix to the `voom()` function to estimate the mean-variance relationship.
+
+```{r}
+v <- voom(transcriptome, design, plot=TRUE)
+v
+```
+
+This is a plot with mean on the x-axis and variance on the y-axis. We see above that as the mean increases, the variance tends to decrease. This is what we usually expect from log counts per million data. Let's correct that:
+
+- The `lmFit()` function fits the linear models 
+
+```{r}
+vfit <- lmFit(v, design)
+vfit <- contrasts.fit(vfit, contrasts=contr.matrix)
+efit <- eBayes(vfit)
+plotSA(efit)
+```
 
