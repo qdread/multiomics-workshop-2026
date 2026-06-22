@@ -57,6 +57,7 @@ Load packages. If you are running this code from within the SCINet project, the 
 # CRAN packages
 library(ggplot2)
 library(RColorBrewer)
+library(gplots)
 
 # Bioconductor packages
 library(limma)
@@ -346,5 +347,48 @@ length(de.common)
 ```
 
 ```{r venn of genes different in all comparisons}
-vennDiagram(dt[,1:3], circle.col=c("turquoise", "salmon"))
+vennDiagram(dt, circle.col=c("turquoise", "salmon", "darkolivegreen3"))
+```
+
+### Upset plot
+
+An Upset plot is another way of showing how many genes are differentially expressed between each pair of time points, and how much overlap there is across all the pairs.
+
+```{r UpSet}
+nonzero_abs_dt <- abs(dt[apply(dt, 1, function(row) !all(row ==0)),])
+grays <- c("gray30", "gray15", "gray0")
+cols <- c("salmon", "darkolivegreen3", "turquoise3", "mediumpurple1")
+aaa <- make_comb_mat(nonzero_abs_dt)
+UpSet(aaa, pt_size = unit(5, "mm"),
+      bg_col = "#F0F0F0", lwd = 3,
+      column_title = "Overlapping differential genes",
+      comb_col = grays[comb_degree(aaa)],
+      #set_order = names(nonzero_abs_dt),
+      right_annotation = upset_right_annotation(aaa, 
+                                                gp = gpar(col = cols, fill = cols),
+                                                annotation_name_side = "top",
+                                                axis_param = list(side = "top")))
+```
+
+### Looking at individual genes
+
+The `topTreat()` function shows us the genes with the most different expression between any given pair of time points. By default it shows us the ones with the lowest adjusted p-values, but we can supply the argument `sort.by = 'logFC'` to show the ones with the largest log-fold changes. The list of genes is similar in both cases.
+
+```{r differences}
+base.vs.mid <- topTreat(tfit, coef=1, n=20)
+base.vs.mid_bylogFC <- topTreat(tfit, coef=1, n=20, sort.by = 'logFC')
+base.vs.post <- topTreat(tfit, coef=2, n=Inf)
+mid.vs.post <- topTreat(tfit, coef=3, n=Inf)
+head(base.vs.mid)
+```
+
+We can also use `plotMD()` to make something like a volcano plot for all three pairs of time points. 
+
+```{r}
+plotMD(tfit, column=1, status=dt[,1], main=colnames(tfit)[1], xlim=c(-5,17),
+       hl.col=c("salmon", "turquoise3"))
+plotMD(tfit, column=2, status=dt[,2], main=colnames(tfit)[2], xlim=c(-5,17),
+       hl.col=c("salmon", "turquoise3"))
+plotMD(tfit, column=3, status=dt[,3], main=colnames(tfit)[3], xlim=c(-5,17),
+       hl.col=c("salmon", "turquoise3"))
 ```
