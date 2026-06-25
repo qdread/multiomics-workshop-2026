@@ -66,7 +66,7 @@ library(Mus.musculus)
 library(ComplexHeatmap)
 ```
 
-Set plot theme.
+Set plot theme for any ggplot2 plots we might make during this session.
 
 ```{r set plot theme}
 theme_set(
@@ -83,19 +83,26 @@ The data to be imported is in a file called `transcriptome.rda`. RNAseq data con
 
 Load the data into your workspace.
 
-```{r}
+```{r load from local folder}
 load(file = 'data/transcriptome.rda')
 ```
 
+If you are running this code on your own laptop and not on the remote server, you will need to load the data from a URL on GitHub where I am hosting it, using the code below.
+
+```{r load from URL, eval = FALSE}
+load(file = url('https://usda-ree-ars.github.io/SEAStatsData/omics2026/transcriptome.rda'))
+```
+
+
 Look at the dimensions of the `counts` object. There are > 45,000 rows (genes) and 18 columns (samples).
 
-```{r}
+```{r view dim}
 dim(transcriptome$counts)
 ```
 
 The `samples` metadata object does not currently have information on which time point each sample comes from. This code manually adds the group column.
 
-```{r}
+```{r add group column}
 groups <- as.factor(c("tp_0h", "tp_0h", "tp_4h", "tp_24h", "tp_0h", "tp_4h", "tp_24h", "tp_0h", "tp_4h", "tp_24h", "tp_4h", "tp_24h", "tp_0h", "tp_4h", "tp_24h", "tp_0h", "tp_4h", "tp_24h"))
 transcriptome$samples$group <- groups
 transcriptome$samples
@@ -103,11 +110,11 @@ transcriptome$samples
 
 Take a look at the first few rows of the `counts` object. You can see that the rows are named with the Ensembl gene IDs. To get more informative IDs, look up the Ensembl gene IDs using a lookup table that is included in the Mus.musculus package.
 
-```{r}
+```{r view counts}
 head(transcriptome$counts)
 ```
 
-```{r}
+```{r match gene names}
 geneid <- rownames(transcriptome)
 genes <- select(
   Mus.musculus, 
@@ -120,7 +127,7 @@ dim(genes)
 
 There are a few more genes in the new lookup table than there are in the original dataset, so there must be a few duplicates. Remove any duplicates by keeping only the first instance of each of the Ensembl IDs. Then add the `genes` lookup table to our data list.
 
-```{r}
+```{r filter duplicates}
 genes <- genes[!duplicated(genes$ENSEMBL),]
 transcriptome$genes <- genes
 ```
@@ -133,13 +140,15 @@ The 18 samples all have a different library size, as we saw above when we looked
 
 One kind of transformation we can do is the CPM (counts per million) transformation. In these samples, library size varies from ~7 million at the lowest sequencing depth to ~26 million at the highest. A gene with CPM = 1 for this sample would have ~7 counts in the low-depth and ~26 counts in the high-depth sample. The function `cpm()` from edgeR implements this transformation.
 
-```{r}
+```{r CPM transformation}
 cpm <- cpm(transcriptome)
 ```
 
 The log-CPM transformation is the CPM on the log base 2 scale. Because many of the counts are zero, a small constant is added before taking the log, which is based on the average library size. This avoids taking the log of zero and also smooths out the variability for genes expressed at a low level.
 
-```{r}
+The `summary()` method prints summary statistics for each of the 18 samples. You can see that the distribution is very similar across the samples. (Compare to `summary(cpm)` for the untransformed counts per million.)
+
+```{r LCPM transformation}
 lcpm <- cpm(transcriptome, log = TRUE)
 
 summary(lcpm)
@@ -147,19 +156,21 @@ summary(lcpm)
 
 ## Filtering by expression
 
-An obvious step is to remove genes that have all zero counts across all the samples. They contribute no information at all. Almost 20,000 of the 45,000 genes have zero counts across all 18 samples.
+An obvious step is to remove genes that have all zero counts across all the samples. They contribute no information at all. The below code calculates how many genes have zero counts (but doesn't remove them yet). Almost 20,000 of the 45,000 genes have zero counts across all 18 samples.
 
-```{r}
+```{r count zero genes}
 table(rowSums(transcriptome$counts) == 0)
 ```
 
-But genes that are expressed at very low levels across all samples also probably don't have any biological relevance. We want to remove them as well. The function `filterByExpr()` from the edgeR package keeps only genes that have a CPM value above a pre-specified cutoff in a reasonable proportion of the samples. Using all default arguments to this function, we filter out about 30,000 genes, leaving a little less than 15,000.
+Removing the genes that are all zeros is a no-brainer. But genes that are expressed at very low levels across all samples probably don't have any biological relevance either. We want to remove them as well. But before we do, we have to define what we mean by "a very low level" of expression. The function `filterByExpr()` from the edgeR package keeps only genes that have a CPM value above a pre-specified cutoff in a reasonable proportion of the samples. Using all default arguments to this function, we filter out about 30,000 genes, leaving a little less than 15,000.
 
-> Details on how the filtering is done: the default minimum read count is 10. Convert that to a CPM using the median library size of 21 million from the dataset; 10/21 $\approx$ 0.48. Because each time point has six replicates, the filtering keeps all genes with a CPM of at least 0.48 in six samples.
+> Details on how the filtering is done: the default minimum read count is 10. Convert that to a CPM using the median library size of 21 million from the dataset; 10/21 $\approx$ 0.48. Because each time point has six replicates, the filtering keeps all genes that have a CPM of at least 0.48 in six or more of the samples.
 
-```{r}
-transcriptome_unfiltered <- transcriptome # Keep this so that we can make the figure comparing filtered vs. unfiltered later.
+```{r filter by expression}
+# Makes a copy of the unfiltered data, so that we can make the figure comparing filtered vs. unfiltered later.
+transcriptome_unfiltered <- transcriptome 
 
+# Decide which genes to keep and then filter the transcriptome data by that criterion
 keep.exprs <- filterByExpr(transcriptome, group = transcriptome$samples$group)
 transcriptome <- transcriptome[keep.exprs, , keep.lib.sizes = FALSE]
 dim(transcriptome)
@@ -169,7 +180,7 @@ Let's take a look at the distribution of log CPM values in the original unfilter
 
 You can see that the filtering process has removed the large proportion of genes within each sampling with little or no expression.
 
-```{r}
+```{r log CPM pre and post filtering plots}
 L <- mean(transcriptome_unfiltered$samples$lib.size) * 1e-6
 M <- median(transcriptome_unfiltered$samples$lib.size) * 1e-6
 
@@ -219,7 +230,7 @@ Ultimately, we are interested in looking at expression patterns across all genes
 
 The basic way MDS, and more or less all dimensionality reduction methods, work, is that it tries to reduce N-dimensional data into a smaller number of dimensions, while preserving as much information from the original data as possible. Here, our N is ~15,000. MDS takes the distances between each pair from our 18 samples in N-dimensional space and puts them into a lower-dimensional space in such a way that the distances between any two samples are preserved as well as possible. If the lower number of dimensions is 2, we can display it on a scatterplot. I'll skip any more details on that.
 
-```{r}
+```{r MDS plot, fig.height=5, fig.width=5}
 plotMDS(
   lcpm_filtered, 
   labels = groups, 
@@ -235,12 +246,13 @@ We are going to use a linear model approach to look at which genes are expressed
 
 In this case, we are going to use the function `voom` from the limma package to deal with the mean-variance relationship issue. (Apparently "voom" stands for "mean-variance modeling at the observational level," though I am not sure how they got those letters from that.) The voom algorithm takes the log-counts per million values (after we've already filtered the ones with very low counts out), fits linear models to each gene separately to estimate the relationship between the mean and the variance, then weights each observation to adjust it based on its predicted variance. Observations with higher predicted variance get a lower weight. This flattens out the mean-variance trend.
 
-The first step is to set up a design matrix, which is a matrix of zeros and ones that indicates which group (time point in this case) each sample belongs to. The design matrix object also includes a contrasts attribute, which indicates which means have to be subtracted from each other to get the differences between each pair of means.
+The first step is to set up a design matrix, which is a matrix of zeros and ones that indicates which group (time point in this case) each sample belongs to. The design matrix object also includes a contrasts attribute, which indicates which of the group means have to be subtracted from each other to get the differences between each pair of means.
 
-```{r}
-design <- model.matrix(~0+groups)
+```{r Create design matrix}
+design <- model.matrix(~ 0 + groups)
 colnames(design) <- gsub("groups", "", colnames(design))
 design
+
 contr.matrix <- makeContrasts(
   Comp_0h_v_4h = tp_0h - tp_4h,
   Comp_0h_v_24h = tp_0h - tp_24h,
@@ -251,12 +263,18 @@ contr.matrix
 
 Now we can just pass the filtered transcriptome data object and the design matrix to the `voom()` function to estimate the mean-variance relationship.
 
-```{r}
+```{r run voom, fig.height=5, fig.width=5}
 v <- voom(transcriptome, design, plot=TRUE)
-v
 ```
 
 This is a plot with mean on the x-axis and variance on the y-axis. We see above that as the mean increases, the variance tends to decrease. This is what we usually expect from log counts per million data. `voom()` has just calculated weights for each observation that will adjust for that. 
+
+Here are the first few rows of the weights calculated by `voom()`. The 9th column stands out &mdash; again, this is the "weird" sample we noticed earlier in the MDS plot.
+
+```{r}
+head(v$weights)
+```
+
 
 # Differential expression analysis
 
@@ -266,7 +284,7 @@ Now we can do differential expression analysis using the weights that `voom()` c
 
 The `lmFit()` function fits the linear models for each gene, using the inverse variance weights we just calculated using `voom()`. Then, we use `contrasts.fit()` to take the pairwise contrasts between each pair of time points: 0h versus 4h, 0h versus 24h, and 4h versus 24h. Next, `eBayes()` tests whether each contrast is equal to zero, using a method called empirical Bayes to bring all the variances for each gene closer to a common value. `plotSA()` shows us the mean-variance trend after the correction. Looks much better than before!
 
-```{r}
+```{r fit and show new trend}
 vfit <- lmFit(v, design)
 vfit <- contrasts.fit(vfit, contrasts=contr.matrix)
 efit <- eBayes(vfit)
@@ -277,7 +295,7 @@ plotSA(efit)
 
 The function `decideTests()` identifies which genes are significantly differentially expressed between each pair of time points. By default, a false discovery rate correction is used to adjust for the multiple tests we're doing across many genes &mdash; if we didn't make that adjustment, we would get a lot of false positives because if you test thousands of genes, some will be significant by random chance alone. (In fact, if we use uncorrected $p < 0.05$ as the significance threshold, 5% of the genes, or 1 in 20, would show a significant difference even if the data were just noise. Out of almost 15,000 genes, that's about 750. So, it's important to correct for multiple testing.) 
 
-```{r}
+```{r number of significant genes eBayes}
 summary(decideTests(efit))
 ```
 
@@ -289,7 +307,7 @@ We may also be interested in a specific cutoff that we consider to be a biologic
 
 Here we'll use the `treat()` function to update the specify `lfc = 1` cutoff instead of using the empirical Bayes adjustment. A log-2 fold change of 1 means one expression has to be at least 2 times as high as the other to be considered a significant difference.
 
-```{r}
+```{r number of significant genes cutoff}
 tfit <- treat(vfit, lfc=1)
 dt <- decideTests(tfit)
 summary(dt)
@@ -309,21 +327,18 @@ Because we have three time points, we want to know if some genes were significan
 
 The `dt` object we generated from `decideTests()` with log-fold-change cutoff of 1 is a matrix with three columns and a row for each gene. For each of the comparisons between time points, it has a 0 if the difference was not significant, a -1 if the difference was significantly negative, and a 1 if the difference was significantly positive.
 
-Here we are identifying which rows have a significant difference, whether positive or negative, between 0 and 4 and also between 0 and 24. There are 14 genes that fit that description.
+Here we are identifying which rows have a significant difference, whether positive or negative, between 0 and 4 and also between 0 and 24. There are 14 genes that fit that description. Here are their names. One gene had an Ensembl ID but no annotation, hence why it shows up as `NA`.
 
-```{r}
+```{r different than baseline}
 de.common <- which(dt[,1]!=0 & dt[,2]!=0)
-length(de.common)
-```
-Here are the names of those genes:
 
-```{r}
+length(de.common)
 tfit$genes$SYMBOL[de.common]
 ```
 
-This Venn diagram indicates how many genes are differentially expressed only between 0 and 4, only between 0 and 24, and between both. The 14673 floating in the corner is the number of genes not significantly differentially expressed between either of those two pairs.
+This Venn diagram indicates how many genes are differentially expressed only between 0 and 4 hours, only between 0 and 24 hours, and between both. The 14673 floating in the corner is the number of genes not significantly differentially expressed between either of those two pairs.
 
-```{r}
+```{r Venn different than baseline, fig.height=5, fig.width=7}
 vennDiagram(dt[,1:2], circle.col=c("turquoise", "salmon"))
 ```
 
@@ -331,11 +346,12 @@ Here's a similar Venn diagram looking at how many genes are different from the m
 
 There are only two genes, including leptin, that are differentially expressed both between 0 and 4 and between 4 and 24 hours.
 
-```{r different that mid state}
+```{r different than midpoint}
 de.common <- which(dt[,1]!=0 & dt[,3]!=0)
 tfit$genes$SYMBOL[de.common]
 ```
-```{r venn of genes different that mid state}
+
+```{r Venn of genes different than midpoint, fig.height=5, fig.width=7}
 vennDiagram(dt[,c(1,3)], circle.col=c("turquoise", "salmon"))
 ```
 
@@ -346,7 +362,7 @@ de.common <- which(dt[,1]!=0 & dt[,2]!=0 & dt[,3]!=0)
 length(de.common)
 ```
 
-```{r venn of genes different in all comparisons}
+```{r Venn of genes different in all comparisons , fig.height=6, fig.width=7}
 vennDiagram(dt, circle.col=c("turquoise", "salmon", "darkolivegreen3"))
 ```
 
@@ -358,13 +374,12 @@ An Upset plot is another way of showing how many genes are differentially expres
 nonzero_abs_dt <- abs(dt[apply(dt, 1, function(row) !all(row ==0)),])
 grays <- c("gray30", "gray15", "gray0")
 cols <- c("salmon", "darkolivegreen3", "turquoise3", "mediumpurple1")
-aaa <- make_comb_mat(nonzero_abs_dt)
-UpSet(aaa, pt_size = unit(5, "mm"),
+nonzero_comb_matrix <- make_comb_mat(nonzero_abs_dt)
+UpSet(nonzero_comb_matrix, pt_size = unit(5, "mm"),
       bg_col = "#F0F0F0", lwd = 3,
       column_title = "Overlapping differential genes",
-      comb_col = grays[comb_degree(aaa)],
-      #set_order = names(nonzero_abs_dt),
-      right_annotation = upset_right_annotation(aaa, 
+      comb_col = grays[comb_degree(nonzero_comb_matrix)],
+      right_annotation = upset_right_annotation(nonzero_comb_matrix, 
                                                 gp = gpar(col = cols, fill = cols),
                                                 annotation_name_side = "top",
                                                 axis_param = list(side = "top")))
@@ -372,23 +387,72 @@ UpSet(aaa, pt_size = unit(5, "mm"),
 
 ### Looking at individual genes
 
-The `topTreat()` function shows us the genes with the most different expression between any given pair of time points. By default it shows us the ones with the lowest adjusted p-values, but we can supply the argument `sort.by = 'logFC'` to show the ones with the largest log-fold changes. The list of genes is similar in both cases.
+The `topTreat()` function shows us the genes with the most different expression between any given pair of time points. By default it shows us the ones with the lowest adjusted p-values, but we can supply the argument `sort.by = 'logFC'` to show the ones with the largest log-fold changes. Only a few rows of one of the comparisons is shown here but you can explore the others. The list of genes is similar whether p-value or log-fold change is used.
 
-```{r differences}
+```{r top differences}
 base.vs.mid <- topTreat(tfit, coef=1, n=20)
 base.vs.mid_bylogFC <- topTreat(tfit, coef=1, n=20, sort.by = 'logFC')
-base.vs.post <- topTreat(tfit, coef=2, n=Inf)
-mid.vs.post <- topTreat(tfit, coef=3, n=Inf)
+base.vs.post <- topTreat(tfit, coef=2, n=20)
+mid.vs.post <- topTreat(tfit, coef=3, n=20)
 head(base.vs.mid)
 ```
 
-We can also use `plotMD()` to make something like a volcano plot for all three pairs of time points. 
+We can also use `plotMD()` to make a mean-difference plot, which is basically a sideways volcano plot, for all three pairs of time points. The x-axis on each plot shows the average of the log of expression between the two time points, and the y-axis is the log-fold change. Pink points above the zero line are those that are significantly more expressed at the earlier of the two time points, and blue points below the midline are those that are significantly more expressed at the later time point.
 
-```{r}
+```{r mean-difference plots, fig.height=4, fig.width=6}
 plotMD(tfit, column=1, status=dt[,1], main=colnames(tfit)[1], xlim=c(-5,17),
        hl.col=c("salmon", "turquoise3"))
 plotMD(tfit, column=2, status=dt[,2], main=colnames(tfit)[2], xlim=c(-5,17),
        hl.col=c("salmon", "turquoise3"))
 plotMD(tfit, column=3, status=dt[,3], main=colnames(tfit)[3], xlim=c(-5,17),
        hl.col=c("salmon", "turquoise3"))
+```
+
+### Heat map
+
+Here is a heat map of the 20 genes with the most significant differences across the three pairs of time points. The argument `scale = 'row'` means that log-expression values within each gene are standardized to a z-score. Then, a simple clustering algorithm is applied to group similar samples together. 
+
+In this case, samples from the same time point tend to cluster together.
+We also see that most of the genes shown here (which are the genes with the top 20 most significant p-values) are highly expressed at time point 0 and then not as highly expressed later on. However there are also a few genes that are not expressed very much at time point 0 but increase in expression at the later time points.
+
+```{r heatmap, fig.height=7, fig.width=9}
+base.vs.mid <- topTreat(tfit, coef=1, n=Inf)
+base.vs.post <- topTreat(tfit, coef=2, n=Inf)
+mid.vs.post <- topTreat(tfit, coef=3, n=Inf)
+
+topgenes_df <- rbind(base.vs.mid, base.vs.post, mid.vs.post)
+topgenes_ordered_df <- topgenes_df[order(topgenes_df$adj.P.Val),]
+topgenes <- unique(c(topgenes_ordered_df$ENSEMBL))[1:20]
+#i <- which(v$genes$ENSEMBL %in% base.vs.mid.topgenes)
+i <- which(v$genes$ENSEMBL %in% topgenes)
+# Create a continuous color palette using colorRampPalette
+# You can customize the colors in the palette as needed
+mycol <- colorRampPalette(c("turquoise4", "turquoise3", "white", "salmon", "darkred"))(100)
+samples <- factor(c("0h", "0h", "4h", "24h", "0h", "4h", "24h", "0h", "4h", "24h", "4h", "24h", "0h", "4h", "24h", "0h", "4h", "24h"), levels = c("0h", "4h", "24h"))
+
+heatmap.2(lcpm_filtered[i,], 
+          scale="row",
+          labRow=v$genes$SYMBOL[i],
+          labCol=samples,
+          col=mycol, trace="none", density.info="none",
+          dendrogram="both")
+```
+
+### Individual gene expression
+
+It is also straightforward to extract log-expression values for an individual gene and plot them. For example let's look at leptin expression. Medians are plotted as diamonds over the data.
+
+```{r plot leptin expression, fig.height=5, fig.width=5}
+i <- which(genes$SYMBOL == 'Lep')
+samples <- c("0h", "0h", "4h", "24h", "0h", "4h", "24h", "0h", "4h", "24h", "4h", "24h", "0h", "4h", "24h", "0h", "4h", "24h")
+
+leptin_data <- data.frame(time_point = factor(samples, levels = c('0h', '4h', '24h')), LCPM = lcpm[i, ])
+
+ggplot(leptin_data, aes(x = time_point, color = time_point, y = LCPM)) +
+  geom_point(size = 3, alpha = 0.5) +
+  stat_summary(fun = 'median', geom = 'point', shape = 5, size = 5) +
+  theme(legend.position = 'none') +
+  scale_color_manual(values = c("salmon", "darkolivegreen3", "turquoise3")) +
+  labs(x = 'Time point') +
+  ggtitle('Leptin expression')
 ```
