@@ -1,5 +1,5 @@
 ---
-title: "Multiomics workshop part 3: INSERT TITLE HERE"
+title: "Multiomics workshop part 3: Multi-omics integration with DIABLO"
 author: "Quentin D. Read"
 date: "`r format(Sys.time(), '%B %d, %Y')`"
 output: 
@@ -21,19 +21,104 @@ output:
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 ```
 
+# Background
+
+Up to now, we have been working with a single omics dataset at once. Although we can do multivariate analyses with a single omics dataset, we have greater ambitions. We want to know whether there are 
+
+**A NOTE OF CAUTION**: It's important to note that the analyses we are doing here are biologically naive. We know that there are complex biological processes going on within these cells that involve RNA transcripts, proteins, and various metabolites. We're not explicitly incorporating any knowledge about those processes into the models we are creating here. We are just mining the data for statistical associations between features across multiple multivariate datasets. I use the word "features" intentionally here; the analytical techniques we are using here are completely ignorant of whether those vectors of numbers represent RNA, protein, or anything else. To the model, they are just numbers. Thus, it is very important to keep in mind that this type of analysis is exploratory in nature. It can help draw attention to patterns existing in the data, that may indicate that certain biological processes are going on. We can use the patterns to speculate about the processes. Of course, these data do come from a manipulative experiment where cells were randomly assigned to treatments; so that does give us some basis to talk about causation when it comes to the treatment groups. But when it comes to the statistical associations between features in the different omics datasets, ultimately it is an exploratory/correlational analysis. We can use it to draw a lot of pretty pictures that are interesting to talk about, but it should be viewed as a jumping-off point for more detailed future studies into the specific biological processes behind them. Rant over!!!
+
 # Setup
 
-Load packages. Set plot theme.
+## Load packages
+
+Load packages; as before, you may need to install packages from CRAN or Bioconductor if you are running this code on your own machine.
 
 ```{r load packages}
-library(ggplot2)
-
-theme_set(
-  theme_bw(base_size = 14) + 
-    theme(panel.grid = element_blank(),
-          strip.background = element_blank(),
-          axis.text = element_text(color = 'black'))
-)
+library(mixOmics)
 ```
 
+## Import pre-transformed data
 
+These data have already been transformed to the $log_2$ scale, and features with low or no variance have been filtered out. This was done in the first two notebooks.
+
+```{r data import}
+transcriptomics_log2_z <- read.csv('data/transcriptomics_log2.csv', row.names = 1)
+
+proteomics_log2_z <- read.csv('data/proteomics_log2.csv', row.names = 1)
+
+metabolomics_log2_z <- read.csv('data/metabolomics_filtered_log2.csv', row.names = 1)
+```
+
+## Prepare data for integration
+
+Put the three data frames into a list. The data were imported in a format where each row is a feature and each column is a sample, but mixOmics requires the opposite: samples in rows and features in columns. So, we use the `t()` function to transpose each of the data frames. Also, mixOmics doesn't play well with missing data, so we use the `na.omit()` function to get rid of any rows with even a single missing value. That's a very simplistic way of dealing with missing data; in practice you may want to play with multiple imputation or other methods for imputing missing data. In this case, we end up removing only a few hundred of the ~15,000 transcriptome features, and none of the proteome features, but we lose about half of the 171 metabolome features.
+
+```{r}
+data = list(transcripts = t(na.omit(transcriptomics_log2_z)),
+            metabolites = t(na.omit(metabolomics_log2_z)),
+            proteins = t(na.omit(proteomics_log2_z)))
+```
+
+Check the dimensions of each of the three omics datasets. They all have 18 rows, as expected, one for each sample (6 each from 3 different time points), with differing numbers of columns.
+
+```{r}
+lapply(data, dim)
+```
+
+Check to make sure each of the three omics datasets have their rows in the same order. 
+
+```{r}
+lapply(data, row.names)
+```
+
+The samples are all ordered in the same way in each dataset, in increasing order by time point. Create a vector `Y` to assign the samples to groups (time points in this case).
+
+```{r}
+Y <- factor(rep(c('0h', '4h', '24h'), each = 6), levels = c('0h', '4h', '24h'))
+```
+
+# Pairwise correlations between omics datasets
+
+Before we do the full multiomics analysis, we need to look at the correlations between each pair of omics datasets. This will help us determine the design weights to use in the DIABLO analysis. What are those? Well, we have to assign a weight between 0 and 1 to each pair of omics datasets. The weight we choose depends on the goal of the analysis. Higher weights close to 1 prioritize a descriptive analysis that explains the maximum amount of correlation in the dataset. Lower weights give higher prediction accuracy but do not have as much explanatory power. If prediction is your goal, then you should use a small weight, for example 0.1. 
+
+Instead of trying to guess what weight we should use, let's use a data-driven approach. We will do a quick partial least squares (PLS) analysis, with only one component, on each pair of omics datasets. Then calculate the correlation between the components associated with each of the datasets from the PLS.
+
+```{r}
+pls1 <- pls(data[["transcripts"]], data[["metabolites"]], ncomp = 1)
+pls2 <- pls(data[["transcripts"]], data[["proteins"]], ncomp = 1)
+pls3 <- pls(data[["metabolites"]], data[["proteins"]], ncomp = 1)
+
+# calculate correlation of transcripts and metabolites
+print(cor(pls1$variates$X, pls1$variates$Y))
+# calculate correlation of transcripts and proteins
+print(cor(pls2$variates$X, pls2$variates$Y))
+# calculate correlation of metabolites and proteins
+print(cor(pls3$variates$X, pls3$variates$Y))
+```
+
+The pairwise correlations are all very high, at least 0.9. We can use 0.9 as the design weight in our DIABLO analysis.
+
+# Initial DIABLO model
+
+Create the design matrix with a diagonal of 0s and all off-diagonal entries being 0.9.
+
+```{r design matrix}
+design = matrix(0.9, ncol = length(data), nrow = length(data), 
+                dimnames = list(names(data), names(data)))
+diag(design) = 0 
+
+design
+```
+
+Fit the DIABLO model using the `block.splsda()` function.
+
+```{r form basic DIABLO model}
+# form basic DIABLO model
+basic.diablo.model = block.splsda(X = data, Y = Y, ncomp = 4, design = design)
+
+# run component number tuning with repeated CV
+perf.diablo = perf(basic.diablo.model, validation = 'Mfold', 
+                   folds = 4, nrepeat = 4) 
+
+plot(perf.diablo, col = c("salmon", "darkolivegreen3", "turquoise3")) # plot output of tuning
+```

@@ -2,3 +2,6 @@
 .Rhistory
 .RData
 .Ruserdata
+
+# Ignore HTML rendering of the markdown notebooks
+*.html

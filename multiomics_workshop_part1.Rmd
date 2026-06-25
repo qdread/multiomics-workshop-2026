@@ -51,7 +51,7 @@ Here are the original sources this lesson is based on:
 
 ## Load packages
 
-Load packages. If you are running this code from within the SCINet project, the packages should already be installed. If you are running this code on your own machine, you may need to install some of the packages. Packages that are hosted on CRAN, the main R package repository, can be installed using `install.packages('packagename')`. Packages that are hosted on Bioconductor can be installed by first installing the BiocManager package from CRAN and then installing Bioconductor packages using `BiocManager::install('packagename')`. 
+Load packages. If you are running this code on the remote server, the packages should already be installed. If you are running this code on your own machine, you may need to install some of the packages. Packages that are hosted on CRAN, the main R package repository, can be installed using `install.packages('packagename')`. Packages that are hosted on Bioconductor can be installed by first installing the BiocManager package from CRAN and then installing Bioconductor packages using `BiocManager::install('packagename')`. 
 
 ```{r load packages}
 # CRAN packages
