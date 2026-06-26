@@ -23,7 +23,33 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 
 # Background
 
-Up to now, we have been working with a single omics dataset at once. Although we can do multivariate analyses with a single omics dataset, we have greater ambitions. We want to know whether there are 
+Up to now, we have been working with a single omics dataset at once. Although we can do multivariate analyses with a single omics dataset, we have greater ambitions. We want to know whether there are patterns in the data that cut across multiple omics and also are associated with our variable of interest (time, in this case study). 
+
+## N-Integration 
+
+N-Integration is the framework of having multiple datasets which measure different aspects of the same samples. For example, you may have transcriptomic, genetic and proteomic data for the same set of cells. N-integrative methods are built to use the information in all three of these dataframes simultaneously.
+
+DIABLO is a novel `mixOmics` framework for the integration of multiple data sets while explaining their relationship with a categorical outcome variable. DIABLO stands for **D**ata **I**ntegration **A**nalysis for **B**iomarker discovery using **L**atent variable approaches for **O**mics studies. It can also be referred to as Multiblock (s)PLS-DA. 
+
+## What is sPLS-DA?
+
+DIABLO is based on a technique called sPLS-DA, which stands for *sparse partial least squares discriminant analysis*. But what is that? Let's start by explaining what partial least squares is and (vaguely) how it works.
+
+### Partial least squares
+
+Partial least squares is a statistical technique. Like many of the statistical techniques we are familiar with, starting with fitting a line through points in a scatter plot and going all the way up to the neural networks underlying AI large language models, it is a form of regression. The objective of PLS is to find the relationships between two matrices *X* and *Y*, by identifying the multidimensional direction in *X* that explains the maximum variance in the *Y* multidimensional space. Partial least squares discriminan analysis (PLS-DA) is just a variant of PLS where *Y* is a single categorical variable. We can use PLS-DA in this case because our response variable is just time point, with three discrete categories. The goal of PLS-DA is to summarize the original data in fewer dimensions, maximizing variation between groups and minimizing variation within groups.
+
+In PLS, we typically choose a number of components, meaning the number of dimensions we want to reduce our many-dimensional dataset down to, while preserving as much information about it as possible. You can see in the diagram below that our original dataset *X* is of dimensions $N \times P$, where *N* is the number of samples and *P* the number of features. Usually in omics analyses, *P* is much bigger than *N*: in other words we have a lot more variables (genes, metabolites, microbiome taxa, etc., which could number up to the thousands) than we have independent samples (maybe in the 10-100 range). The goal of PLS is to preserve as much information as possible from the original $N \times P$ dataset using *k* components (*k* = 3 in the diagram). We estimate *Q* components, which are each *N*-length vectors, and *k* loading vectors, which are each of length *P*. The product of a $N \times k$ matrix times a $k \times P$ matrix is a matrix of dimensions $N \times P$. We estimate the values of the component and loading vectors to get as close as possible to the original data. If *P* is a really big number, and *k* is small, and our PLS model does a good job of recapturing the initial data, we have reduced the amount of data points needed to explain the pattern from the original $NP$ down to $Nk + kP = Q(N+P)$ which is tiny in comparison.
+
+### Sparse partial least squares discriminant analysis
+
+Sparse partial least squares (sPLS), which includes a special variant for categorical responses called sPLS-DA, is a form of PLS where only a subset of the variables in *X* are used to explain *Y*. This is useful both for explaining variation in the data and for predicting the response. It helps with explanation because it narrows down the pool of candidate variables, and it helps with prediction because it protects against overfitting.
+
+sPLS-DA uses an algorithm called LASSO to reduce the number of variables from the dataset that are used to construct the loading vectors. In other words, the loading vectors that we estimated in PLS are now forced to have a lot of zeros in them. The amount of information we are using to summarize the information in the original dataset is even less.
+
+### Multiblock sPLS-DA
+
+Multiblock sPLS-DA, the technique used by DIABLO, extends sPLS-DA to more than one *X* dataset. Now we're trying to find a set of components that does two things: maximizes the correlation between our datasets $X_1, X_2, ... X_Q$ and, as before, explains the most variation in our categorical variable of interest *Y*.
 
 **A NOTE OF CAUTION**: It's important to note that the analyses we are doing here are biologically naive. We know that there are complex biological processes going on within these cells that involve RNA transcripts, proteins, and various metabolites. We're not explicitly incorporating any knowledge about those processes into the models we are creating here. We are just mining the data for statistical associations between features across multiple multivariate datasets. I use the word "features" intentionally here; the analytical techniques we are using here are completely ignorant of whether those vectors of numbers represent RNA, protein, or anything else. To the model, they are just numbers. Thus, it is very important to keep in mind that this type of analysis is exploratory in nature. It can help draw attention to patterns existing in the data, that may indicate that certain biological processes are going on. We can use the patterns to speculate about the processes. Of course, these data do come from a manipulative experiment where cells were randomly assigned to treatments; so that does give us some basis to talk about causation when it comes to the treatment groups. But when it comes to the statistical associations between features in the different omics datasets, ultimately it is an exploratory/correlational analysis. We can use it to draw a lot of pretty pictures that are interesting to talk about, but it should be viewed as a jumping-off point for more detailed future studies into the specific biological processes behind them. Rant over!!!
 
@@ -54,9 +80,9 @@ metabolomics_log2_z <- read.csv('data/metabolomics_filtered_log2.csv', row.names
 Put the three data frames into a list. The data were imported in a format where each row is a feature and each column is a sample, but mixOmics requires the opposite: samples in rows and features in columns. So, we use the `t()` function to transpose each of the data frames. Also, mixOmics doesn't play well with missing data, so we use the `na.omit()` function to get rid of any rows with even a single missing value. That's a very simplistic way of dealing with missing data; in practice you may want to play with multiple imputation or other methods for imputing missing data. In this case, we end up removing only a few hundred of the ~15,000 transcriptome features, and none of the proteome features, but we lose about half of the 171 metabolome features.
 
 ```{r}
-data = list(transcripts = t(na.omit(transcriptomics_log2_z)),
-            metabolites = t(na.omit(metabolomics_log2_z)),
-            proteins = t(na.omit(proteomics_log2_z)))
+data <- list(transcripts = t(na.omit(transcriptomics_log2_z)),
+             metabolites = t(na.omit(metabolomics_log2_z)),
+             proteins = t(na.omit(proteomics_log2_z)))
 ```
 
 Check the dimensions of each of the three omics datasets. They all have 18 rows, as expected, one for each sample (6 each from 3 different time points), with differing numbers of columns.
@@ -98,27 +124,76 @@ print(cor(pls3$variates$X, pls3$variates$Y))
 
 The pairwise correlations are all very high, at least 0.9. We can use 0.9 as the design weight in our DIABLO analysis.
 
-# Initial DIABLO model
+# Tuning the DIABLO model
 
 Create the design matrix with a diagonal of 0s and all off-diagonal entries being 0.9.
 
 ```{r design matrix}
-design = matrix(0.9, ncol = length(data), nrow = length(data), 
+design <- matrix(0.9, ncol = length(data), nrow = length(data), 
                 dimnames = list(names(data), names(data)))
-diag(design) = 0 
+diag(design) <- 0 
 
 design
 ```
 
-Fit the DIABLO model using the `block.splsda()` function.
+Fit an initial DIABLO model using the `block.splsda()` function. We input our list of three omics datasets called `data` to the `X` argument of the function, and our categorical time point variable as `Y`. We specify `ncomp = 4` to fit up to four components, and we also pass the `design` matrix we created earlier.
 
 ```{r form basic DIABLO model}
 # form basic DIABLO model
-basic.diablo.model = block.splsda(X = data, Y = Y, ncomp = 4, design = design)
+basic.diablo.model <- block.splsda(X = data, Y = Y, ncomp = 4, design = design)
+```
 
+The next step is to tune the model using cross-validation to determine how many components is optimal to explain the most variation between groups in `Y` without overfitting. Now, because we have only three groups in `Y`, it is unlikely that we will need more than two components &mdash; if you have two groups in your data, you should only need one component to separate them, and you'd need two components for three groups, three for four groups, etc. So, we could probably use common sense to say that two components are adequate without doing the cross-validation. But let's do it anyway to confirm that intuition.
+
+The `perf()` function is used to tune the model. The arguments `validation = 'Mfold', folds = 3` tell it to do 3-fold cross-validation. What this does is divide the data up into three equal groups and fit the model three times, each time excluding the data from one group. Then, use the model that was fit to the other two groups to predict the classes of the observations in the excluded group. Repeat this process for 1-4 components, then repeat the entire thing 10 times (`nrepeat = 10`) to make sure we didn't get a fluke result from the way we randomly split up the data.
+
+```{r form basic DIABLO model}
 # run component number tuning with repeated CV
 perf.diablo = perf(basic.diablo.model, validation = 'Mfold', 
-                   folds = 4, nrepeat = 4) 
+                   folds = 3, nrepeat = 10)
+```
 
+The `plot()` method for the cross-validation output shows two types of error rate: overall (ER) and balanced (BER). Because we have exactly 6 samples at each time point, the data are perfectly balanced, so the ER and BER lines are identical here. If we had observational data that was imbalanced, they might differ. It also shows three types of distance metric that can be used for the prediction.
+
+What does the plot show us? First of all, it shows that the error rate declines as the number of components increases. This makes sense because we are allowing the model to have more parameters, the more components are included. It also shows that the error rate is basically zero when we have $k = 2$ components. As we guessed beforehand, more than 2 is not necessary and will really only lead to overfitting. We also see that the metric `max.dist` is not very good when there's only one component, but the difference between distance metrics is negligible at 2 components and up.
+
+```{r form basic DIABLO model}
 plot(perf.diablo, col = c("salmon", "darkolivegreen3", "turquoise3")) # plot output of tuning
 ```
+
+The `perf.diablo` object also tells us the optimal number of components it identified, using various methods. Here is one of them. Regardless of distance metric, 2 is the optimum.
+
+```{r}
+perf.diablo$choice.ncomp$WeightedVote
+```
+
+Given the results of the first tuning, let's choose $k = 2$ components and use the `centroids.dist` metric because it always performed as well or better than the other metrics.
+
+We will now do a second tuning step, this time to select a number of features to keep on each component. Remember that DIABLO is based on *sparse* PLS, meaning that only a subset of the original data is used. We are also using cross-validation for this part of the process, but this time we have to fit the model many more times because of all the different combinations of numbers of features we are trying out. We do the cross-validation for all possible combinations out of the list in `test.keepX`.
+
+This takes a few minutes to run because it is a relatively small omics dataset, so I did not bother to do anything to speed up the process. If you are working with a bigger dataset, consider looking into the `BiocParallel` package which will allow you to parallelize the computations so that multiple processors can work simultaneously, each fitting models with different combinations of numbers of features. 
+
+Note you also may want to increase `nrepeat` and use more finely spaced numbers of features in the tuning grid.
+
+```{r Tuning the number of features}
+test.keepX <- list(
+  transcripts = c(10, 20, 30, 40, 50),
+  metabolites = c(5, 10, 15, 20, 25),
+  proteins = c(10, 20, 30, 40, 50)
+)
+
+# run the feature selection tuning
+tune.MULTI = tune.block.splsda(X = data, Y = Y, ncomp = 2, 
+                              test.keepX = test.keepX, design = design,
+                              validation = 'Mfold', folds = 3, nrepeat = 10,
+                              dist = "centroids.dist")
+```
+
+How many features on each component gave the best predictive performance in cross-validation?
+
+```{r}
+tune.MULTI$choice.keepX
+```
+
+
+# Final DIABLO model
