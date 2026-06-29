@@ -171,29 +171,167 @@ Given the results of the first tuning, let's choose $k = 2$ components and use t
 
 We will now do a second tuning step, this time to select a number of features to keep on each component. Remember that DIABLO is based on *sparse* PLS, meaning that only a subset of the original data is used. We are also using cross-validation for this part of the process, but this time we have to fit the model many more times because of all the different combinations of numbers of features we are trying out. We do the cross-validation for all possible combinations out of the list in `test.keepX`.
 
-This takes a few minutes to run because it is a relatively small omics dataset, so I did not bother to do anything to speed up the process. If you are working with a bigger dataset, consider looking into the `BiocParallel` package which will allow you to parallelize the computations so that multiple processors can work simultaneously, each fitting models with different combinations of numbers of features. 
+This takes ~5 minutes to run. Because it is a relatively small omics dataset, I did not bother to do anything to speed up the process. If you are working with a bigger dataset, consider looking into the `BiocParallel` package which will allow you to parallelize the computations so that multiple processors can work simultaneously, each fitting models with different combinations of numbers of features. 
 
-Note you also may want to increase `nrepeat` and use more finely spaced numbers of features in the tuning grid.
+In practice you also may want to increase `nrepeat` to at least 10 repetitions.
 
 ```{r Tuning the number of features}
 test.keepX <- list(
-  transcripts = c(10, 20, 30, 40, 50),
-  metabolites = c(5, 10, 15, 20, 25),
-  proteins = c(10, 20, 30, 40, 50)
+  transcripts = c(1, 2, 3, 4, 5, 10, 15, 20, 30, 40),
+  metabolites = c(1, 2, 3, 4, 5, 10),
+  proteins = c(1, 2, 3, 4, 5, 10, 15, 20, 30, 40)
 )
 
-# run the feature selection tuning
+Sys.time()
 tune.MULTI = tune.block.splsda(X = data, Y = Y, ncomp = 2, 
                               test.keepX = test.keepX, design = design,
-                              validation = 'Mfold', folds = 3, nrepeat = 10,
-                              dist = "centroids.dist")
+                              validation = 'Mfold', folds = 3, nrepeat = 1,
+                              dist = "centroids.dist", seed = 123)
+Sys.time()
 ```
 
-How many features on each component gave the best predictive performance in cross-validation?
+How many features on each component gave the best predictive performance in cross-validation? We see that other than gene transcripts, very few variables are needed to capture most of the information in the original dataset. In particular, component 2 has only one variable from each omics dataset with a nonzero loading.
+
+Note that in practice you might want to use more finely spaced numbers of features in the tuning grid. I used less finely spaced numbers to save time for the demo.
 
 ```{r}
-tune.MULTI$choice.keepX
+list.keepX <- tune.MULTI$choice.keepX
+list.keepX
 ```
 
-
 # Final DIABLO model
+
+To review, we have done the following to decide on the parameters of our final DIABLO model:
+
+- PLS on each pair of omics datasets to decide what cross-correlation values to put in the design matrix (`design`)
+- Cross-validation on an initial DIABLO model to decide how many components to include in the final model (`ncomp`)
+- Another cross-validation after setting the optimal number of components, to decide how many features from each omics dataset will have nonzero loadings on each component in the final model (`list.keepX`)
+
+Input all those values into the `block.splsda()` function to fit our final DIABLO model!
+
+```{r Final model}
+final.diablo.model = block.splsda(X = data, Y = Y, ncomp = 2, 
+                          keepX = list.keepX, design = design)
+```
+
+## Look at selected variables
+
+Which variables from each of the omics datasets had non-zero loadings on the two components? The function `selectVar()` pulls these out. The selected variables have patterns of abundance that differ in a 
+
+
+The selected variables can be extracted with the function selectVar(), for example in the mRNA block, as seen below. Note that the stability of selected variables can be extracted from the output of the perf() function.
+
+```{r check vars}
+# the features selected to form the first component
+selectVar(final.diablo.model, block = 'transcripts', comp = 1)$transcripts$name 
+selectVar(final.diablo.model, block = 'metabolites', comp = 1)$metabolites$name 
+selectVar(final.diablo.model, block = 'proteins', comp = 1)$proteins$name
+
+selectVar(final.diablo.model, block = 'transcripts', comp = 2)$transcripts$name 
+selectVar(final.diablo.model, block = 'metabolites', comp = 2)$metabolites$name 
+selectVar(final.diablo.model, block = 'proteins', comp = 2)$proteins$name 
+```
+
+## Plots
+
+### Diagnostic correlation plot
+
+The first thing to do is a diagnostic correlation plot that confirms that the correlations between each pair of omics were maximized as specified by the design matrix. The correlations are high and positive which looks good.
+
+```{r Diagnostic correlation plot}
+plotDiablo(final.diablo.model, ncomp = 1, col.per.group = c("salmon", "darkolivegreen3", "turquoise3"))
+```
+
+### Individual scatter plots and arrow plot
+
+Next, we can plot scatter plots of how the individual samples are represented in the two-dimensional space formed by the two components. A separate plot is generated for each of the three omics (or blocks, as they are referred to in the mixOmics package). 
+
+The plot here shows that across all three omics, component 1 separates the 4h time point from the other two. Despite only having a few variables with nonzero loadings, component 2 further separates the 0h and 24h time points.
+
+```{r sample plots}
+plotIndiv(final.diablo.model, ind.names = FALSE, legend = TRUE, 
+          title = 'DIABLO Sample Plots', col = c("salmon", "darkolivegreen3", "turquoise3"))
+```
+
+A so-called "arrow plot" shows how well the three omics agree with one another. This plot has the same information as the plot we just made by `plotIndiv()` but with a slightly different twist: each of the 18 samples is shown as a central point with three arrows radiating from it, each one pointing to the sample's coordinate on the two PLS components with respect to one of the three omics. If the arrows are short and the representations of each sample in the three different omics are close to one another, that means the omics datasets agree with each other closely. As we would expect given the high (> 0.9) correlations between each pair of omics, we see that the transcriptome, metabolome, and proteome agree well with each other here. Regardless of which omics dataset you look at, the clustering pattern of the time points is virtually identical.
+
+```{r arrow plot}
+plotArrow(final.diablo.model, ind.names = FALSE, legend = TRUE, 
+          title = 'DIABLO', col.per.group = c("salmon", "darkolivegreen3", "turquoise3"))
+```
+
+### Correlation circle plot
+
+This is a plot of the correlations between each of the selected variables and the components. Recall that 30, 4, and 2 variables were selected from transcriptome, metabolome, and proteome, respectively, for component 1, and only 1 from each of the omics for component 2. They are nearly all perfectly positively or negatively correlated with the component they were selected on. This is expected.
+
+```{r Variable plot}
+plotVar(final.diablo.model, var.names = FALSE, 
+        style = 'lattice', legend = TRUE,
+        pch = c(16, 17, 15), cex = c(0.8,0.8,0.8), 
+        col = c("salmon", "darkolivegreen3", "turquoise3"))
+```
+
+### Circos plot
+
+A Circos plot is a fairly common type of visualization that you see in omics integration studies. I am not sure how effective they are at conveying information about the data, because they are somewhat unintuitive. Let's start by making a Circos plot for component 1 only, as indicated by argument `comp = 1`.
+
+Let's break down what we are looking at here.
+
+- You can see a slice of the pie for each of the three omics. Most of the circle is taken up by the transcriptome data because 30 variables were selected from that dataset to have nonzero loadings in the final model, compared to 4 for metabolome and only 2 for proteome.
+- Around the outside are lines indicating the relative abundance of each feature at the three time points (there's no labeled y-axis because it's all just relative, but the further from the center, the higher the abundance). Of the selected genes from the transcriptome dataset, a bit more than half were abundant at time 4h and less abundant at times 0h and 24h, and the rest showed the opposite pattern. This matches what we saw in the individual scatterplots: component 1 separates 4h from the other two time points, so it makes sense that the variables selected for that component are the ones where the 4h time point differs the most from the other two.
+- The spiderweb-like pattern in the middle consists of lines connecting pairs of features that are (a) in two different omics and (b) correlated with one another. I set the argument `cutoff = 0.97` to display a line at the very strict cutoff of $|r| = 0.97$. Even with this strict cutoff, two of the metabolites and one of the proteins are shown as being correlated with many of the genes in the transcriptome. The metabolites and protein are both more abundant at the 4h time point, so they are connected with purple lines (indicating positive correlation) with the genes that are expressed more highly at 4h, and black lines (indicating negative correlation) to the genes that are not.
+
+```{r circos plot, fig.height=8, fig.width=8}
+circosPlot(final.diablo.model, cutoff = 0.97, line = TRUE, comp = 1,
+           color.blocks= c("salmon", "darkolivegreen3", "turquoise3"),
+           color.cor = c("mediumpurple1","grey20"), size.labels = 1,
+           size.variables = 0.4, linkWidth = 0.3, showIntraLinks = FALSE, var.adj=-0.33)
+```
+
+Because only one variable from each omics was selected on component 2, that's too few to make a Circos plot for component 2 only. But if we remove the `comp = 1` argument we can make a Circos plot with all the variables selected on components 1 and 2. It's pretty similar to the first one.
+
+```{r circos plot both components, fig.height=8, fig.width=8}
+circosPlot(final.diablo.model, cutoff = 0.97, line = TRUE, 
+           color.blocks= c("salmon", "darkolivegreen3", "turquoise3"),
+           color.cor = c("mediumpurple1","grey20"), size.labels = 1,
+           size.variables = 0.4, linkWidth = 0.3, showIntraLinks = FALSE, var.adj=-0.33)
+```
+
+### Loading weights plot
+
+This plot shows the selected variables for each of the three omics, as a horizontal bar plot. The bar for each variable shows the group that has the highest absolute value loading on component 1. 
+Looking at the transcriptome plot in the upper left, we see that the selected genes have either a positive or a negative loading on component 1. Because positive loadings on component 1 happen to be associated with high abundance at the 4h time point, the `plotLoadings()` function automatically colors the genes with the 4h color (green) if they have a positive loading on component 1. The genes with a negative loading are either colored pink or blue depending on whether the gene was more abundant at the 0h or 24h time point.
+
+```{r loading weights, fig.height=8, fig.width=8}
+plotLoadings(final.diablo.model, comp = 1, contrib = 'max', method = 'median', size.name = 0.6, legend.color = c("salmon", "darkolivegreen3", "turquoise3"))
+```
+
+### Heat map
+
+This heat map has a similar interpretation to the one we made in a previous session. In the heat map, the colors represent standardized abundance values for the features. Each column is a feature that was selected to have nonzero loading in the final DIABLO model. Each row is one of the 18 samples. If we don't supply a `comp` argument to the heat map plotting function `cimDiablo()`, it will default to showing us component 1. So as with some of the previous visualizations we've seen, this heat map once again emphasizes that component 1 separates out the 4h time point from the other two. All features shown here are either low in abundance at 4h and high at 0h and 24h (the columns on the left), or the opposite (the columns on the right).
+
+```{r heatmap}
+#dev.off()
+n_colors <- 1000  # Number of colors in the gradient
+color_palette <- colorRampPalette(c("turquoise4", "turquoise3", "paleturquoise1", "lemonchiffon", "peachpuff", "salmon", "darkred"))(n_colors)
+cimDiablo(final.diablo.model, margins = c(2, 18), size.legend = 1, color.blocks = c("salmon", "darkolivegreen3", "turquoise3"), color.Y = c("gray60", "gray90", "gray70"), color = color_palette)
+#quartz.save("mixOmics_heatmap", type = "png", device = dev.cur(), dpi = 300)
+```
+
+## Performance of the model
+
+We can now look at how well the model predicts. In other words, working "backward" from the omics data, can we predict what time point a particular observation of omics data comes from? This is once again done by cross-validation, where we purposefully hide some data from the model fitting process, fit the model to the remaining data, and predict what groups the held-out data points belong to.
+
+We see that the error rate is low with one component (~14% overall) and the prediction performance becomes perfect when adding the second component.
+
+```{r CV evaluation of final model performance}
+perf.diablo = perf(final.diablo.model, validation = 'Mfold',
+                   folds = 3, nrepeat = 10, 
+                   dist = 'centroids.dist', seed = 321) 
+
+perf.diablo$WeightedVote.error.rate
+```
+
+It may not make a lot of sense why we want to check this, because we already know the time point for all the data that we have, and in practice you would not have a sample of omics data without knowing what time point it came from. After all, our goal here is more exploring patterns in existing omics data, than training a model so that we can predict outcomes for future omics data we collect. But even if our goal is inference and understanding rather than prediction, it is reassuring if our model has good predictive performance. We can say that our model has learned something from the data, which means that we can look at outputs from the model and use them to understand the data. The data are from the real world and the model is not, it's only an abstraction of reality. So it's only useful if we can tie it back to reality in some way.
+
+On that inspiring note, let's end our workshop on multiomics integration!
