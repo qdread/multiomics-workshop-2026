@@ -61,6 +61,7 @@ Load packages; as before, you may need to install packages from CRAN or Biocondu
 
 ```{r load packages}
 library(mixOmics)
+library(Mus.musculus)
 ```
 
 ## Import pre-transformed data
@@ -79,7 +80,7 @@ metabolomics_log2_z <- read.csv('data/metabolomics_filtered_log2.csv', row.names
 
 Put the three data frames into a list. The data were imported in a format where each row is a feature and each column is a sample, but mixOmics requires the opposite: samples in rows and features in columns. So, we use the `t()` function to transpose each of the data frames. Also, mixOmics doesn't play well with missing data, so we use the `na.omit()` function to get rid of any rows with even a single missing value. That's a very simplistic way of dealing with missing data; in practice you may want to play with multiple imputation or other methods for imputing missing data. In this case, we end up removing only a few hundred of the ~15,000 transcriptome features, and none of the proteome features, but we lose about half of the 171 metabolome features.
 
-```{r}
+```{r construct data list}
 data <- list(transcripts = t(na.omit(transcriptomics_log2_z)),
              metabolites = t(na.omit(metabolomics_log2_z)),
              proteins = t(na.omit(proteomics_log2_z)))
@@ -87,21 +88,36 @@ data <- list(transcripts = t(na.omit(transcriptomics_log2_z)),
 
 Check the dimensions of each of the three omics datasets. They all have 18 rows, as expected, one for each sample (6 each from 3 different time points), with differing numbers of columns.
 
-```{r}
+```{r dimensions}
 lapply(data, dim)
 ```
 
 Check to make sure each of the three omics datasets have their rows in the same order. 
 
-```{r}
+```{r check row names}
 lapply(data, row.names)
 ```
 
 The samples are all ordered in the same way in each dataset, in increasing order by time point. Create a vector `Y` to assign the samples to groups (time points in this case).
 
-```{r}
+```{r group vector}
 Y <- factor(rep(c('0h', '4h', '24h'), each = 6), levels = c('0h', '4h', '24h'))
 ```
+
+One final setup step. As we did in part 1, let's use the Mus.musculus package, which contains mouse gene annotation information, to replace the numerical gene IDs with annotations where possible. Some tweaking of the code was needed to not have duplicate column names, which can cause problems later on.
+
+```{r replace annotations}
+genes <- select(
+  Mus.musculus, 
+  keys=colnames(data$transcripts), 
+  columns=c("SYMBOL", "TXCHROM", "ENTREZID"),
+  keytype="ENSEMBL"
+)
+
+genes <- genes[!duplicated(genes$ENSEMBL),]
+colnames(data$transcripts)[!duplicated(genes$SYMBOL) & !is.na(genes$SYMBOL)] <- genes$SYMBOL[!duplicated(genes$SYMBOL) & !is.na(genes$SYMBOL)]
+```
+
 
 # Pairwise correlations between omics datasets
 
@@ -109,7 +125,7 @@ Before we do the full multiomics analysis, we need to look at the correlations b
 
 Instead of trying to guess what weight we should use, let's use a data-driven approach. We will do a quick partial least squares (PLS) analysis, with only one component, on each pair of omics datasets. Then calculate the correlation between the components associated with each of the datasets from the PLS.
 
-```{r}
+```{r pairwise PLS}
 pls1 <- pls(data[["transcripts"]], data[["metabolites"]], ncomp = 1)
 pls2 <- pls(data[["transcripts"]], data[["proteins"]], ncomp = 1)
 pls3 <- pls(data[["metabolites"]], data[["proteins"]], ncomp = 1)
@@ -138,8 +154,7 @@ design
 
 Fit an initial DIABLO model using the `block.splsda()` function. We input our list of three omics datasets called `data` to the `X` argument of the function, and our categorical time point variable as `Y`. We specify `ncomp = 4` to fit up to four components, and we also pass the `design` matrix we created earlier.
 
-```{r form basic DIABLO model}
-# form basic DIABLO model
+```{r fit basic DIABLO model}
 basic.diablo.model <- block.splsda(X = data, Y = Y, ncomp = 4, design = design)
 ```
 
@@ -147,23 +162,22 @@ The next step is to tune the model using cross-validation to determine how many 
 
 The `perf()` function is used to tune the model. The arguments `validation = 'Mfold', folds = 3` tell it to do 3-fold cross-validation. What this does is divide the data up into three equal groups and fit the model three times, each time excluding the data from one group. Then, use the model that was fit to the other two groups to predict the classes of the observations in the excluded group. Repeat this process for 1-4 components, then repeat the entire thing 10 times (`nrepeat = 10`) to make sure we didn't get a fluke result from the way we randomly split up the data.
 
-```{r form basic DIABLO model}
-# run component number tuning with repeated CV
+```{r tune basic DIABLO model}
 perf.diablo = perf(basic.diablo.model, validation = 'Mfold', 
-                   folds = 3, nrepeat = 10)
+                   folds = 3, nrepeat = 10, seed = 1234)
 ```
 
 The `plot()` method for the cross-validation output shows two types of error rate: overall (ER) and balanced (BER). Because we have exactly 6 samples at each time point, the data are perfectly balanced, so the ER and BER lines are identical here. If we had observational data that was imbalanced, they might differ. It also shows three types of distance metric that can be used for the prediction.
 
 What does the plot show us? First of all, it shows that the error rate declines as the number of components increases. This makes sense because we are allowing the model to have more parameters, the more components are included. It also shows that the error rate is basically zero when we have $k = 2$ components. As we guessed beforehand, more than 2 is not necessary and will really only lead to overfitting. We also see that the metric `max.dist` is not very good when there's only one component, but the difference between distance metrics is negligible at 2 components and up.
 
-```{r form basic DIABLO model}
-plot(perf.diablo, col = c("salmon", "darkolivegreen3", "turquoise3")) # plot output of tuning
+```{r component number tuning plot}
+plot(perf.diablo) # plot output of tuning
 ```
 
-The `perf.diablo` object also tells us the optimal number of components it identified, using various methods. Here is one of them. Regardless of distance metric, 2 is the optimum.
+The `perf.diablo` object also tells us the optimal number of components it identified, using various methods. Here is one of them. Two of the three distance metrics identify 2 as the optimal number of components. Mahalanobis distance identifies 4 as optimal, but it performed less well than the other metrics at 2 components, so we'll stick with 2. Simpler is better.
 
-```{r}
+```{r optimal component numbers}
 perf.diablo$choice.ncomp$WeightedVote
 ```
 
@@ -175,26 +189,24 @@ This takes ~5 minutes to run. Because it is a relatively small omics dataset, I 
 
 In practice you also may want to increase `nrepeat` to at least 10 repetitions.
 
-```{r Tuning the number of features}
+```{r tune number of features}
 test.keepX <- list(
   transcripts = c(1, 2, 3, 4, 5, 10, 15, 20, 30, 40),
   metabolites = c(1, 2, 3, 4, 5, 10),
   proteins = c(1, 2, 3, 4, 5, 10, 15, 20, 30, 40)
 )
 
-Sys.time()
 tune.MULTI = tune.block.splsda(X = data, Y = Y, ncomp = 2, 
                               test.keepX = test.keepX, design = design,
                               validation = 'Mfold', folds = 3, nrepeat = 1,
                               dist = "centroids.dist", seed = 123)
-Sys.time()
 ```
 
 How many features on each component gave the best predictive performance in cross-validation? We see that other than gene transcripts, very few variables are needed to capture most of the information in the original dataset. In particular, component 2 has only one variable from each omics dataset with a nonzero loading.
 
 Note that in practice you might want to use more finely spaced numbers of features in the tuning grid. I used less finely spaced numbers to save time for the demo.
 
-```{r}
+```{r optimal number of features}
 list.keepX <- tune.MULTI$choice.keepX
 list.keepX
 ```
@@ -209,7 +221,7 @@ To review, we have done the following to decide on the parameters of our final D
 
 Input all those values into the `block.splsda()` function to fit our final DIABLO model!
 
-```{r Final model}
+```{r fit final model}
 final.diablo.model = block.splsda(X = data, Y = Y, ncomp = 2, 
                           keepX = list.keepX, design = design)
 ```
@@ -221,8 +233,7 @@ Which variables from each of the omics datasets had non-zero loadings on the two
 
 The selected variables can be extracted with the function selectVar(), for example in the mRNA block, as seen below. Note that the stability of selected variables can be extracted from the output of the perf() function.
 
-```{r check vars}
-# the features selected to form the first component
+```{r list selected variables}
 selectVar(final.diablo.model, block = 'transcripts', comp = 1)$transcripts$name 
 selectVar(final.diablo.model, block = 'metabolites', comp = 1)$metabolites$name 
 selectVar(final.diablo.model, block = 'proteins', comp = 1)$proteins$name
@@ -238,7 +249,7 @@ selectVar(final.diablo.model, block = 'proteins', comp = 2)$proteins$name
 
 The first thing to do is a diagnostic correlation plot that confirms that the correlations between each pair of omics were maximized as specified by the design matrix. The correlations are high and positive which looks good.
 
-```{r Diagnostic correlation plot}
+```{r diagnostic correlation plot}
 plotDiablo(final.diablo.model, ncomp = 1, col.per.group = c("salmon", "darkolivegreen3", "turquoise3"))
 ```
 
@@ -248,7 +259,7 @@ Next, we can plot scatter plots of how the individual samples are represented in
 
 The plot here shows that across all three omics, component 1 separates the 4h time point from the other two. Despite only having a few variables with nonzero loadings, component 2 further separates the 0h and 24h time points.
 
-```{r sample plots}
+```{r scatter plots}
 plotIndiv(final.diablo.model, ind.names = FALSE, legend = TRUE, 
           title = 'DIABLO Sample Plots', col = c("salmon", "darkolivegreen3", "turquoise3"))
 ```
@@ -257,14 +268,14 @@ A so-called "arrow plot" shows how well the three omics agree with one another. 
 
 ```{r arrow plot}
 plotArrow(final.diablo.model, ind.names = FALSE, legend = TRUE, 
-          title = 'DIABLO', col.per.group = c("salmon", "darkolivegreen3", "turquoise3"))
+          title = 'DIABLO', col = c("salmon", "darkolivegreen3", "turquoise3"))
 ```
 
 ### Correlation circle plot
 
 This is a plot of the correlations between each of the selected variables and the components. Recall that 30, 4, and 2 variables were selected from transcriptome, metabolome, and proteome, respectively, for component 1, and only 1 from each of the omics for component 2. They are nearly all perfectly positively or negatively correlated with the component they were selected on. This is expected.
 
-```{r Variable plot}
+```{r correlation circle plot}
 plotVar(final.diablo.model, var.names = FALSE, 
         style = 'lattice', legend = TRUE,
         pch = c(16, 17, 15), cex = c(0.8,0.8,0.8), 
