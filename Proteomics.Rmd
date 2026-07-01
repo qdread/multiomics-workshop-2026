@@ -1,0 +1,370 @@
+---
+title: "Proteomics"
+author: "Matt Burnham"
+output: html_document
+date: "2026-06-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+```{r}
+
+library(dplyr)
+library(limma)
+library(ggplot2)
+library(ggrepel)
+
+```
+# Background
+
+Proteomics data was generated with the same experimental design as transcriptomics (3 time points & 6 replicates = 18 samples.) The investigators provided log2 transformed and filtered data. We will touch on the structure of the raw data and how you may want to prefilter and transform the data. 
+
+Similar to transcriptomics we will:
+
+- examine the structure of the data
+- add metadata
+- transform the data (or backtransform)
+- transform data to fit assumptions for analysis
+- fit differential abundance model
+- apply cuttoffs to identify differentially abundant proteins
+- visualize the results
+
+```{r}
+
+volcano_plot <- function(df, title){
+
+  df$negLogP <- -log10(df$adj.P.Val)
+
+  fc_thresh <- 0.75
+  p_thresh  <- -log10(0.01)
+
+  df$Significant <- with(df, abs(logFC) >= fc_thresh & negLogP >= p_thresh)
+
+  ggplot(df, aes(x = logFC, y = negLogP)) +
+    geom_point(aes(color = Significant), alpha = 0.6) +
+    
+    geom_vline(xintercept = c(-fc_thresh, fc_thresh), 
+               linetype = "dashed", color = "red") +
+    geom_hline(yintercept = p_thresh, 
+               linetype = "dashed", color = "blue") +
+  
+    geom_text_repel(
+      data = subset(df, Significant),
+      aes(label = Gene),
+      size = 3,
+      max.overlaps = 20,
+      box.padding = 0.4,
+      point.padding = 0.3
+    ) +
+    
+    theme_minimal() +
+    labs(title = title,
+         x = "log2 Fold Change",
+         y = "-log10(Adjusted p-value)") +
+    scale_color_manual(values = c("FALSE" = "grey50", "TRUE" = "red"))
+
+}
+
+```
+
+Store path to proteomics data as a value.
+
+```{r}
+
+
+raw <- "Imputed_proteinGroups_perseus.txt"
+
+```
+
+Read in the data keeping comments in mind...
+
+```{r}
+
+data <- read.table(raw, 
+                   sep = '\t', 
+                   header = TRUE, 
+                   comment.char = '#', 
+                   quote = "", 
+                   fill = TRUE, 
+                   check.names = FALSE)
+
+```
+
+Lets inspect the colnames. There a lot of columns that come from the preprocessing of the proteomics data. 
+
+```{r}
+
+colnames(data)
+
+```
+
+The first 18 columns of this dataframe are the intensity columns. For prefiltering, one would first want to identify contaminants and bad IDs. There are three columns we should focus on: 'Reverse', 'Potential Contaminant', and 'Only identified by site'.
+
+Let's take a look of the values stored in these columns.
+
+```{r}
+
+unique(data$Reverse)
+unique(data$`Potential contaminant`)
+unique(data$`Only identified by site`)
+
+```
+
+Since this data was pre-filtered, there are no 'hits' for these rows. If there were, it would look something like this: [1] +. Anyway, lets 'filter' out these contaminants.
+
+```{r}
+
+#here "!=" means "does not contain"
+
+pre_contamination <- length(rownames(data))
+
+data <- subset(data, Reverse != "+" | is.na(Reverse))
+data <- subset(data, `Potential contaminant` != "+" | is.na(`Potential contaminant`))
+data <- subset(data, `Only identified by site` != "+" | is.na(`Only identified by site`))
+
+post_contamination <- length(rownames(data))
+
+print((pre_contamination/post_contamination) * 100)
+```
+As expected, we can see nothing was actually removed. Now lets grab the information that we are actually interested in...
+
+We are using grep to grab the first 18 columns or the intensity columns.
+
+#two-thirds of replicates is in one of the groups for each protein
+
+```{r}
+
+intensity_cols <- grep("^(0h|4h|24h)_", colnames(data), value = TRUE)
+
+
+analysis_data <- data %>%
+  dplyr::select(all_of(intensity_cols))
+
+head(analysis_data)
+
+
+```
+
+Lets get the range of the values to see the behavior of the data...
+
+
+```{r}
+
+ range(as.matrix(analysis_data[, grep("^(0h|4h|24h)_", colnames(analysis_data))]),na.rm = TRUE)
+
+```
+
+We cam see that this range of data is consistent with log2 transformation. For fun, lets revert the data. And plot the distribution.
+
+```{r}
+
+raw_analysis_data <- 2^(analysis_data) - 1
+
+
+for (i in 1:ncol(raw_analysis_data)) {
+  hist(raw_analysis_data[[i]], main=colnames(raw_analysis_data)[i])
+}
+```
+
+As we can see, the data is heavily right-skewed. Lets observe what happens after the log2 transformation...
+
+```{r}
+
+log2_analysis_data <- log2(raw_analysis_data) + 1
+
+for (i in 1:ncol(log2_analysis_data)) {
+  hist(log2_analysis_data[[i]], main=colnames(log2_analysis_data)[i])
+}
+
+```
+While the data is right skewed, it is more normally distributed than before. 
+
+Additionally one my want to filter low abundance proteins, but as we will see it is pre-filtered. 
+
+
+```{r}
+
+filter <- raw_analysis_data[rowSums(raw_analysis_data) == 0, ]
+
+rowSums(filter)
+
+```
+
+Extract gene names, convert intensity data to numeric, assign unique row names, transpose the matrix, and scale protein intensities across samples.
+
+
+```{r}
+
+gene_names <- data$`Gene names`
+
+mat <- analysis_data %>% dplyr::select(all_of(intensity_cols))
+
+
+mat <- mutate_all(mat, ~as.numeric(as.character(.)))
+
+rownames(mat) <- make.unique(data$`Gene names`)
+
+mat_t <- t(mat)
+mat_t_scaled <- scale(mat_t) # scale across proteins
+
+
+```
+
+Perform principal component analysis on the scaled matrix.
+
+```{r}
+
+pca <- prcomp(mat_t_scaled)
+
+```
+
+Calculate the variance explained across two components and build a dataframe with sample ids.Then plot the pca.
+
+```{r}
+
+var_exp <- (pca$sdev^2) / sum(pca$sdev^2)
+
+pc1_pct <- round(var_exp[1] * 100, 1)
+pc2_pct <- round(var_exp[2] * 100, 1)
+
+
+pca_df <- data.frame(
+  sample = rownames(pca$x),
+  group  = sub("_.*", "", rownames(pca$x)),
+  PC1 = pca$x[,1],
+  PC2 = pca$x[,2]
+)
+
+ggplot(pca_df, aes(PC1, PC2, label = sample, color = group)) +
+  geom_point(size = 4) +
+  geom_text(vjust = -1, color = "black") +
+  xlab(paste0("PC1 (", pc1_pct, "%)")) +
+  ylab(paste0("PC2 (", pc2_pct, "%)")) +
+  theme_minimal()
+
+
+
+
+```
+
+We wil create a design matric for the three timepoints (0h, 4h, 24h) AND fits a linear model to the expression matrix mat. We also define the pairwise comparisons we want and store as 'contrast matrix'.
+
+```{r}
+
+samples <- colnames(mat)
+
+groups <- sub("_.*", "", samples)
+groups <- factor(groups, levels = c("0h", "4h", "24h"))
+
+
+design <- model.matrix(~ 0 + groups)
+colnames(design) <- c("H0", "H4", "H24")
+design
+
+
+
+fit <- lmFit(mat, design)
+
+
+
+contrast_matrix <- makeContrasts(
+    H0_vs_H4  = H0  - H4,
+    H0_vs_H24 = H0 - H24,
+    H4_vs_H24 = H4 - H24,
+    levels = design
+)
+
+```
+
+Apply the defined contrasts to the linear‑model fit and then compute empirical Bayes moderated statistics for differential expression.
+
+```{r}
+
+fit2 <- contrasts.fit(fit, contrast_matrix)
+fit2 <- eBayes(fit2)
+
+```
+
+Extract the differential‑expression result tables for each of the three contrasts (H0_vs_H4, H0_vs_H24, and H4_vs_H24) using topTable.
+
+```{r}
+
+res_H0_vs_H4  <- topTable(fit2, coef = "H0_vs_H4",  number = Inf)
+res_H0_vs_H24 <- topTable(fit2, coef = "H0_vs_H24", number = Inf)
+res_H4_vs_H24 <- topTable(fit2, coef = "H4_vs_H24", number = Inf)
+
+
+
+res_H0_vs_H4$Gene  <- rownames(res_H0_vs_H4)
+res_H0_vs_H24$Gene <- rownames(res_H0_vs_H24)
+res_H4_vs_H24$Gene <- rownames(res_H4_vs_H24)
+
+```
+
+Create a volcano plot visualizing the differential‑expression results for the “0h vs 4h” comparison.
+
+```{r}
+volcano_plot(res_H0_vs_H4, "0h vs 4h")
+```
+
+
+```{r}
+
+volcano_plot(res_H0_vs_H24, "0h vs 24h")
+
+
+
+```
+```{r}
+
+volcano_plot(res_H4_vs_H24, "4h vs 24h")
+
+```
+
+
+
+```{r}
+
+adjP_thr <- 0.01
+logFC_thr <- 0.5
+
+
+get_up_genes <- function(df) {
+  rownames(df)[
+    df$logFC  > logFC_thr &
+    df$adj.P.Val < adjP_thr
+  ]
+}
+
+up_H0_vs_H4  <- get_up_genes(res_H0_vs_H4)
+up_H0_vs_H24 <- get_up_genes(res_H0_vs_H24)
+up_H4_vs_H24 <- get_up_genes(res_H4_vs_H24)
+
+all_genes <- unique(c(up_H0_vs_H4, up_H0_vs_H24, up_H4_vs_H24))
+
+up_mat <- matrix(0L, nrow = length(all_genes), ncol = 3,
+                 dimnames = list(all_genes,
+                                 c("H0_vs_H4", "H0_vs_H24", "H4_vs_H24")))
+
+up_mat[up_H0_vs_H4,  "H0_vs_H4" ]  <- 1L
+up_mat[up_H0_vs_H24,"H0_vs_H24"]  <- 1L
+up_mat[up_H4_vs_H24,"H4_vs_H24"]  <- 1L
+
+vennDiagram(up_mat, circle.col=c("turquoise", "salmon", "darkolivegreen3"))
+
+
+```
+
+```{r}
+
+shared_up_genes <- Reduce(intersect,
+                          list(up_H0_vs_H4,
+                               up_H0_vs_H24,
+                               up_H4_vs_H24))
+
+shared_up_genes
+```
+
