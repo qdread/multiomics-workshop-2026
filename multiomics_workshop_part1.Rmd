@@ -1,6 +1,6 @@
 ---
 title: "Multiomics workshop part 1: Working with transcriptome data"
-author: "Quentin D. Read"
+author: "Quentin D. Read & Matt Burnham"
 date: "`r format(Sys.time(), '%B %d, %Y')`"
 output: 
   html_document:
@@ -87,7 +87,7 @@ Load the data into your workspace.
 load(file = 'data/transcriptome.rda')
 ```
 
-If you are running this code on your own laptop and not on the remote server, you will need to load the data from a URL on GitHub where I am hosting it, using the code below.
+If you are running this code on your own laptop and not on the remote server, you will need to load the data from a URL on GitHub Pages where I am hosting it, using the code below.
 
 ```{r load from URL, eval = FALSE}
 load(file = url('https://usda-ree-ars.github.io/SEAStatsData/omics2026/transcriptome.rda'))

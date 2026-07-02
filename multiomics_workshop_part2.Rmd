@@ -1,6 +1,6 @@
 ---
-title: "Multiomics workshop part 2: INSERT TITLE HERE"
-author: "Quentin D. Read"
+title: "Multiomics workshop part 2: Proteome data"
+author: "Matt Burnham & Quentin D. Read"
 date: "`r format(Sys.time(), '%B %d, %Y')`"
 output: 
   html_document:
@@ -21,19 +21,342 @@ output:
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 ```
 
+# Background
+
+Proteomics data were generated from the same samples as the transcriptomics data (3 time points &times; 6 replicates = 18 samples). The investigators provided log~2~ transformed and filtered data. They also provided us with "raw" data, which has not yet been transformed but has been filtered. We will touch on the structure of the raw data and how you may want to prefilter and transform the data. 
+
+Similar to our transcriptomics analysis from Lesson 1, we will:
+
+- examine the structure of the data
+- add metadata
+- transform the data 
+- transform data to fit assumptions for analysis
+- fit differential abundance model
+- apply cutoffs to identify differentially abundant proteins
+- visualize the results
+
 # Setup
 
-Load packages. Set plot theme.
+## Load packages
 
 ```{r load packages}
+library(dplyr)
+library(limma)
 library(ggplot2)
+library(ggrepel)
+```
 
-theme_set(
-  theme_bw(base_size = 14) + 
-    theme(panel.grid = element_blank(),
-          strip.background = element_blank(),
-          axis.text = element_text(color = 'black'))
+Define `volcano_plot()` function which we will use later to visualize differential expression results.
+
+```{r volcano_plot}
+volcano_plot <- function(df, title) {
+
+  df$negLogP <- -log10(df$adj.P.Val)
+
+  fc_thresh <- 0.75
+  p_thresh  <- -log10(0.01)
+
+  df$Significant <- with(df, abs(logFC) >= fc_thresh & negLogP >= p_thresh)
+
+  ggplot(df, aes(x = logFC, y = negLogP)) +
+    geom_point(aes(color = Significant), alpha = 0.6) +
+    
+    geom_vline(xintercept = c(-fc_thresh, fc_thresh), 
+               linetype = "dashed", color = "red") +
+    geom_hline(yintercept = p_thresh, 
+               linetype = "dashed", color = "blue") +
+  
+    geom_text_repel(
+      data = subset(df, Significant),
+      aes(label = Gene),
+      size = 3,
+      max.overlaps = 20,
+      box.padding = 0.4,
+      point.padding = 0.3
+    ) +
+    
+    theme_minimal() +
+    labs(title = title,
+         x = "log2 Fold Change",
+         y = "-log10(Adjusted p-value)") +
+    scale_color_manual(values = c("FALSE" = "grey50", "TRUE" = "red"))
+
+}
+```
+
+## Import data
+
+Create a character variable with the path to the tab-separated text file that contains the untransformed proteome data.
+
+```{r}
+raw <- "data/Imputed_proteinGroups_perseus.txt"
+```
+
+If you're running this code on your own machine, you will need to read the data from the GitHub Pages URL where it is hosted.
+
+```{r, eval = FALSE}
+raw <- url("https://usda-ree-ars.github.io/SEAStatsData/omics2026/Imputed_proteinGroups_perseus.txt")
+```
+
+Read the untransformed data from the tab-separated text file.
+
+```{r read raw data}
+data <- read.table(raw, 
+                   sep = '\t', 
+                   header = TRUE, 
+                   comment.char = '#', 
+                   quote = "", 
+                   fill = TRUE, 
+                   check.names = FALSE)
+```
+
+# Filter and transform data
+
+## Filter the data
+
+Let's look at the column names. The first 18 columns of this dataframe are the intensities for each sample. There are a lot of columns that come from the preprocessing of the proteomics data. 
+
+```{r}
+colnames(data)
+```
+
+For prefiltering, one would first want to identify contaminants and bad IDs. There are three columns we should focus on: 'Reverse', 'Potential Contaminant', and 'Only identified by site'.
+
+Let's take a look at what values are in these columns.
+
+```{r check flag columns}
+unique(data$Reverse)
+unique(data$`Potential contaminant`)
+unique(data$`Only identified by site`)
+```
+Since this data was pre-filtered, there are no 'hits' for these rows. No rows have a flag indicating potential contamination or any other issue. If there were, it would look something like this: `[1] "+"`.
+
+Even though the bad rows have already been filtered out, here is what we would do if we did need to remove rows that were flagged. Assuming the `"+"` character is the flag, we would filter like this. The combination of `!` (not) and `%in%` means to remove all rows equal to `"+"`. At the end we print the percent of rows remaining after the filtering.
+
+```{r filter by flag}
+pre_contamination <- length(rownames(data))
+
+data <- subset(data, !Reverse %in% "+")
+data <- subset(data, !`Potential contaminant` %in% "+")
+data <- subset(data, !`Only identified by site` %in% "+")
+
+post_contamination <- length(rownames(data))
+
+print((pre_contamination/post_contamination) * 100)
+```
+
+As expected, we can see nothing was actually removed. Now let's grab the information that we are actually interested in. We are using `grep()` to grab the first 18 columns or the intensity columns. The first argument to `grep()` is a regular expression that returns `TRUE` for any column name that begins with `"0h_"`, `"4h_"`, or `"24h_"`, and `FALSE` otherwise.
+
+```{r select intensity columns}
+intensity_cols <- grep("^(0h|4h|24h)_", colnames(data), value = TRUE)
+
+analysis_data <- data %>%
+  dplyr::select(all_of(intensity_cols))
+
+head(analysis_data)
+```
+
+Look at the range (minimum and maximum) values.
+
+```{r}
+range(analysis_data, na.rm = TRUE)
+```
+
+The range is consistent with log~2~ transformed data. For fun, let's undo the log transformation and plot the resulting distribution.
+
+```{r plot inverted transformation, fig.show='hold', out.width='33%'}
+raw_analysis_data <- 2^(analysis_data) - 1
+
+for (i in 1:ncol(raw_analysis_data)) {
+  print(hist(raw_analysis_data[[i]], main=colnames(raw_analysis_data)[i]))
+}
+```
+
+As we can see, the distributions are all heavily right-skewed. Let's observe what happens after the log2 transformation...
+
+```{r plot transformed, , fig.show='hold', out.width='33%'}
+log2_analysis_data <- log2(raw_analysis_data + 1)
+
+for (i in 1:ncol(log2_analysis_data)) {
+  print(hist(log2_analysis_data[[i]], main=colnames(log2_analysis_data)[i]))
+}
+```
+
+While the distributions are still right-skewed, they are more normally distributed than before. 
+
+Additionally it is a good idea to remove all rows (proteins) with an abundance of zero across all samples, or even ones with low abundance across all samples even if they are not exactly zero, but as we will see it has been pre-filtered. There are no rows with all zero values.
+
+```{r filter zero rows}
+filter <- raw_analysis_data[rowSums(raw_analysis_data) == 0, ]
+
+nrow(filter)
+```
+
+## Process and standardize data
+
+Confirm that all intensity columns are in numeric format.
+
+```{r}
+mat <- analysis_data %>% dplyr::select(all_of(intensity_cols))
+
+sapply(mat, class)
+```
+
+Extract the gene name column from the original data and correct any duplicates. Assign those names as row names of the intensity data frame. Transpose the data frame, which converts it into a matrix with samples as rows and proteins as columns.
+
+```{r rename and transpose}
+gene_names <- data$`Gene names`
+
+rownames(mat) <- make.unique(gene_names)
+
+mat_t <- t(mat)
+```
+
+Use the `scale()` function to standardize the matrix. By default, this is done on a column basis. That means each protein is standardized, or z-transformed, so that its mean is 0 and standard deviation 1. We do this so that we can compare the *relative* difference in intensity between proteins that may have very different absolute intensities.
+
+```{r standardize}
+mat_t_scaled <- scale(mat_t) 
+```
+
+## Exploratory PCA
+
+Perform a principal component analysis (PCA) on the scaled matrix. PCA is the most basic multivariate analysis technique. It finds a set of axes in *p*-dimensional space, where *p* is the number of proteins, that explains the most variation in the data. PCA is often a good first step when you have multivariate data like omics data, because it is very quick to compute, does a good job of picking out broad patterns in the data, and can identify any weird or problematic samples.
+
+```{r do PCA}
+pca <- prcomp(mat_t_scaled)
+```
+
+Calculate the variance explained across the first two principal components and build a dataframe that includes the sample IDs and the PCA scores for each of the samples on the first two components. Then plot the samples' coordinates on the first two PCA axes, labeling the points.
+
+```{r PCA plot}
+var_exp <- (pca$sdev^2) / sum(pca$sdev^2)
+
+pc1_pct <- round(var_exp[1] * 100, 1)
+pc2_pct <- round(var_exp[2] * 100, 1)
+
+
+pca_df <- data.frame(
+  sample = rownames(pca$x),
+  group  = sub("_.*", "", rownames(pca$x)),
+  PC1 = pca$x[,1],
+  PC2 = pca$x[,2]
+)
+
+ggplot(pca_df, aes(PC1, PC2, label = sample, color = group)) +
+  geom_point(size = 4) +
+  geom_text(vjust = -1, color = "black") +
+  xlab(paste0("PC1 (", pc1_pct, "%)")) +
+  ylab(paste0("PC2 (", pc2_pct, "%)")) +
+  theme_minimal()
+```
+
+The plot shows that the first two PCA axes do a good job separating the time points from each other. It looks very similar to the transcriptomics plot: the first axis separates the 4h time point from the other two, and the second axis separates 0h and 24h from each other.
+
+# Differential expression analysis
+
+## Set up design matrix
+
+We will create a design matrix for the three timepoints (0h, 4h, 24h), as we did for the transcriptome in Lesson 1. This is just a matrix of 0s and 1s indicating which time point each of the 18 samples belongs to. We also define the pairwise comparisons we want in the object `contrast_matrix`; again this is the same as in Lesson 1.
+
+```{r create design matrix}
+samples <- colnames(mat)
+
+groups <- sub("_.*", "", samples)
+groups <- factor(groups, levels = c("0h", "4h", "24h"))
+
+
+design <- model.matrix(~ 0 + groups)
+colnames(design) <- c("H0", "H4", "H24")
+design
+
+contrast_matrix <- makeContrasts(
+    H0_vs_H4  = H0  - H4,
+    H0_vs_H24 = H0 - H24,
+    H4_vs_H24 = H4 - H24,
+    levels = design
 )
 ```
 
+## Fit linear model
+
+Use the function `lmFit()` from the limma package to fit a linear model to each protein (column of the expression matrix `mat`). 
+
+```{r fit LM}
+fit <- lmFit(mat, design)
+```
+
+Apply the defined contrasts to the linear‑model fit and then compute empirical Bayes moderated statistics for differential expression.
+
+```{r empirical Bayes contrasts}
+fit2 <- contrasts.fit(fit, contrast_matrix)
+fit2 <- eBayes(fit2)
+```
+
+## Visualize results
+
+### Volcano plot
+
+Extract the differential‑expression result tables for each of the three contrasts (H0_vs_H4, H0_vs_H24, and H4_vs_H24) using `topTable()`.
+
+```{r extract differential expression}
+res_H0_vs_H4  <- topTable(fit2, coef = "H0_vs_H4",  number = Inf)
+res_H0_vs_H24 <- topTable(fit2, coef = "H0_vs_H24", number = Inf)
+res_H4_vs_H24 <- topTable(fit2, coef = "H4_vs_H24", number = Inf)
+
+res_H0_vs_H4$Gene  <- rownames(res_H0_vs_H4)
+res_H0_vs_H24$Gene <- rownames(res_H0_vs_H24)
+res_H4_vs_H24$Gene <- rownames(res_H4_vs_H24)
+```
+
+Create a volcano plot visualizing the differential‑expression results for the “0h vs 4h” comparison. The proteins with a significant positive fold change were more abundant at the 0h time point, and the ones with a significant negative fold change were more abundant at the 4h time point.
+
+```{r volcano 0 vs 4, fig.height=5, fig.width=6}
+volcano_plot(res_H0_vs_H4, "0h vs 4h")
+```
+
+Do the same for the other two pairs of time points.
+
+```{r volcano plots 0 vs 24 and 4 vs 24}
+volcano_plot(res_H0_vs_H24, "0h vs 24h")
+
+volcano_plot(res_H4_vs_H24, "4h vs 24h")
+```
+
+### Venn diagram
+
+The following code creates a Venn diagram showing how many proteins were differentially abundant between each pair of time points. First, we set a threshold that any pair of proteins with a log~2~ fold change of at least |0.5| (a difference of $2^{\frac{{1}{2}}}$ or ~ 1.4&times;) and an empirical Bayes adjusted p-value of 0.05 or less are considered differentially abundant. Then the next few lines of code generate a matrix with 3 columns, one for each pair of time points, filled with 0s for pairs of time points where a particular gene was not differentially abundant, and 1s where it was.
+
+```{r Venn diagram}
+adjP_thr <- 0.01
+logFC_thr <- 0.5
+
+get_up_genes <- function(df) {
+  rownames(df)[
+    abs(df$logFC)  > logFC_thr &
+    df$adj.P.Val < adjP_thr
+  ]
+}
+
+up_H0_vs_H4  <- get_up_genes(res_H0_vs_H4)
+up_H0_vs_H24 <- get_up_genes(res_H0_vs_H24)
+up_H4_vs_H24 <- get_up_genes(res_H4_vs_H24)
+
+up_mat <- sapply(list(up_H0_vs_H4, up_H0_vs_H24, up_H4_vs_H24),
+                 function(x) ifelse(row.names(mat) %in% x, 1, 0))
+
+colnames(up_mat) <- c("H0_vs_H4", "H0_vs_H24", "H4_vs_H24")
+
+vennDiagram(up_mat, circle.col=c("turquoise", "salmon", "darkolivegreen3"))
+```
+
+The Venn diagram above shows that four proteins had different abundance at all three time points. Here are their names.
+
+```{r}
+shared_up_genes <- Reduce(intersect,
+                          list(up_H0_vs_H4,
+                               up_H0_vs_H24,
+                               up_H4_vs_H24))
+
+shared_up_genes
+```
 

@@ -1,6 +1,6 @@
 ---
 title: "Multiomics workshop part 3: Multi-omics integration with DIABLO"
-author: "Quentin D. Read"
+author: "Quentin D. Read & Matt Burnham"
 date: "`r format(Sys.time(), '%B %d, %Y')`"
 output: 
   html_document:
@@ -25,9 +25,20 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 
 Up to now, we have been working with a single omics dataset at once. Although we can do multivariate analyses with a single omics dataset, we have greater ambitions. We want to know whether there are patterns in the data that cut across multiple omics and also are associated with our variable of interest (time, in this case study). 
 
+So far, in Lessons 1 and 2, we've worked with the transcriptome and proteome data, pre-processing them and exploring them individually. There is also a metabolome dataset, but we are not going to go through that dataset in a separate lesson. We are going to go ahead and do multi-omics analysis using DIABLO on all three datasets together. Here's what we'll be doing in this lesson (we'll explain the different steps in more detail as we go):
+
+- Combine the three pre-transformed omics datasets together and do any final pre-processing
+- Do partial least squares analysis on each pair of omics to get correlation parameters
+- Fit an initial DIABLO model
+- Cross-validate the initial model to determine the optimal number of components
+- Cross-validate the model again to determine the optimal number of features per component
+- Fit the final DIABLO model
+- Make a bunch of plots to make sure the model is valid and explore patterns in the data that the model reveals
+- One last cross-validation to assess the final model performance
+
 ## N-Integration 
 
-N-Integration is the framework of having multiple datasets which measure different aspects of the same samples. For example, you may have transcriptomic, genetic and proteomic data for the same set of cells. N-integrative methods are built to use the information in all three of these dataframes simultaneously.
+N-Integration is the framework of having multiple datasets which measure different aspects of the same samples. For example, you may have transcriptomic, proteomic, methylation, and microbiome data for the same set of cells. N-integrative methods are built to use the information in all of these dataframes simultaneously.
 
 DIABLO is a novel `mixOmics` framework for the integration of multiple data sets while explaining their relationship with a categorical outcome variable. DIABLO stands for **D**ata **I**ntegration **A**nalysis for **B**iomarker discovery using **L**atent variable approaches for **O**mics studies. It can also be referred to as Multiblock (s)PLS-DA. 
 
